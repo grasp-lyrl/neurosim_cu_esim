@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "torch>=2.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurosim_cu_esim"
+version = "0.1"
+description = "CUDA-accelerated frame-differencing event simulator"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+authors = [
+    {name = "Richeek Das", email = "richeek@seas.upenn.edu"},
+]
+keywords = ["event-camera", "event-simulator", "cuda", "neurosim", "pytorch"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+    "torch>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/grasp-lyrl/neurosim"
+Issues = "https://github.com/grasp-lyrl/neurosim_cu_esim/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "ruff>=0.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["neurosim_cu_esim*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+markers = [
+    "cuda: marks tests that require a CUDA GPU",
+]
