@@ -31,7 +31,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     container:
-      image: pytorch/pytorch:2.8.0-cuda12.8-cudnn11-devel
+      image: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
     steps:
       - uses: actions/checkout@v4
 
