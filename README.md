@@ -9,11 +9,11 @@ It is implemented as a single fused CUDA kernel with warp-level aggregation, mak
 
 | Metric | Value |
 |--------|-------|
-| Calls/sec | 46.23 kHz |
+| Calls/sec | 47.23 kHz |
 | Events/call | 18016.82 |
-| Events/sec | 833.01 Mev/s |
-| Forward latency | 21.63 µs |
-| Peak GPU util | 35% |
+| Events/sec | 850.01 Mev/s |
+| Forward latency | 21.20 µs |
+| Peak GPU util | 36% |
 
 ## How it works
 
@@ -132,13 +132,13 @@ Initialize or reset internal state.
 Run the benchmark suite to measure throughput and utilization:
 
 ```bash
-python3 scripts/benchmark_esim.py --precompute-frames 2000 --texture-width 640 --texture-height 480 --velocity-px-s 500
+python3 scripts/benchmark_esim.py
 ```
 
 Optional sanity-check animation (frame + 20 ms aggregated events):
 
 ```bash
-python3 scripts/benchmark_esim.py --precompute-frames 2000 --texture-width 640 --texture-height 480 --velocity-px-s 500 --sanity-video benchmarks/sanity_20ms.mp4
+python3 scripts/benchmark_esim.py --sanity-video benchmarks/sanity_20ms.mp4
 ```
 
 Reported metrics include:

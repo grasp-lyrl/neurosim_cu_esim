@@ -26,17 +26,3 @@ jobs:
 
       - name: Ruff format check
         run: ruff format --check .
-
-  # ── Build + test (requires CUDA runner) ────────────────────────────
-  test:
-    runs-on: ubuntu-latest
-    container:
-      image: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install package (editable + dev deps)
-        run: pip install -e ".[dev]"
-
-      - name: Run tests
-        run: pytest --tb=short -v
