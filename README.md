@@ -3,6 +3,12 @@
 A high-performance CUDA implementation of the frame-differencing event generation algorithm written for the [Neurosim simulator](https://github.com/grasp-lyrl/neurosim). 
 It is implemented as a single fused CUDA kernel with warp-level aggregation, making it **~10× faster** than reference Pytorch/CUDA implementations.
 
+<p align="center">
+    <img src="assets/example.gif" alt="Example output — moving texture stimulus and generated events (20 ms aggregation)" style="width:80%;" />
+    <br/>
+    <em>Example output: input frame (left) with events aggregated for 20 ms (right). See <a href="#benchmarking">Benchmarking</a> for reproduction.</em>
+</p>
+
 ---
 
 **Performance metrics on an RTX 4090 for a 640×480 moving texture stimulus:**

@@ -35,8 +35,8 @@ __global__ void evsim_kernel(
 
     if (x < width && y < height) {
         const scalar_t cur_log = log(new_image[y][x]);
-        const scalar_t ub     = intensity_state_ub[y][x];
-        const scalar_t lb     = intensity_state_lb[y][x];
+        const scalar_t ub      = intensity_state_ub[y][x];
+        const scalar_t lb      = intensity_state_lb[y][x];
 
         pos_event = cur_log > ub;
         const bool neg_event = cur_log < lb;
