@@ -5,7 +5,7 @@ It is implemented as a single fused CUDA kernel with warp-level aggregation, mak
 
 ---
 
-**Example performance metrics for a 640×480 moving texture stimulus on an NVIDIA RTX 4090:**
+**Performance metrics on an RTX 4090 for a 640×480 moving texture stimulus:**
 
 | Metric | Value |
 |--------|-------|
@@ -14,6 +14,11 @@ It is implemented as a single fused CUDA kernel with warp-level aggregation, mak
 | Events/sec | 850.01 Mev/s |
 | Forward latency | 21.20 µs |
 | Peak GPU util | 36% |
+
+✨ neurosim_cu_esim achieves **~11× better throughput** and **~10× lower latency** than [rpg_vid2e](https://github.com/uzh-rpg/rpg_vid2e) esim CUDA implementation.
+
+> **Calls/sec** measures how many frames can be processed per second.
+> **Events/call** measures the total number of events generated per frame. Both quantities are very data specific.
 
 ## How it works
 
@@ -168,3 +173,7 @@ conda run -n esim pytest
 ruff check .
 ruff format --check .
 ```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) for details.

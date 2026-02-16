@@ -18,6 +18,7 @@ import argparse
 import threading
 import subprocess
 from pathlib import Path
+from collections.abc import Callable
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 
@@ -29,6 +30,7 @@ from neurosim_cu_esim import EventSimulator
 
 @dataclass
 class TrialResult:
+    backend: str
     trial_index: int
     elapsed_s: float
     calls: int
@@ -352,6 +354,7 @@ def animate_sanity_check(
 
 
 def run_single_trial(
+    backend: str,
     trial_index: int,
     width: int,
     height: int,
@@ -359,28 +362,26 @@ def run_single_trial(
     warmup_calls: int,
     latency_calls: int,
     frame_bank: list[torch.Tensor],
-    contrast_threshold_neg: float,
-    contrast_threshold_pos: float,
-    device: str,
+    runner_factory: Callable[
+        [],
+        tuple[
+            Callable[[torch.Tensor, int], None],
+            Callable[[torch.Tensor, int], int],
+        ],
+    ],
     gpu_index: int,
     gpu_util_poll_interval_s: float,
 ) -> TrialResult:
-    sim = EventSimulator(
-        width=width,
-        height=height,
-        contrast_threshold_neg=contrast_threshold_neg,
-        contrast_threshold_pos=contrast_threshold_pos,
-        device=device,
-    )
+    init_fn, step_fn = runner_factory()
 
     timestamp_step_us = int(round(1e6 / fps_timestamp))
     ts = 0
 
-    sim.init(frame_bank[0])
+    init_fn(frame_bank[0], ts)
     ts += timestamp_step_us
 
     for i in range(warmup_calls):
-        sim(frame_bank[i % len(frame_bank)], ts)
+        step_fn(frame_bank[i % len(frame_bank)], ts)
         ts += timestamp_step_us
 
     torch.cuda.synchronize()
@@ -398,9 +399,7 @@ def run_single_trial(
     start_evt.record()
     for i in range(calls):
         frame = frame_bank[i % len(frame_bank)]
-        events = sim(frame, ts)
-        if events is not None:
-            total_events += int(events.x.numel())
+        total_events += step_fn(frame, ts)
         ts += timestamp_step_us
     end_evt.record()
 
@@ -415,6 +414,7 @@ def run_single_trial(
     avg_latency_us = (total_ms * 1000.0) / calls if calls > 0 else 0.0
 
     return TrialResult(
+        backend=backend,
         trial_index=trial_index,
         elapsed_s=elapsed_s,
         calls=calls,
@@ -544,8 +544,99 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sanity-show", action="store_true", help="Display sanity animation window"
     )
+    parser.add_argument(
+        "--compare-vid2e",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Also benchmark thirdparty cu_rpg_vid2e_esim reference backend "
+            "(default: enabled)."
+        ),
+    )
 
     return parser.parse_args()
+
+
+def make_neurosim_runner_factory(
+    width: int,
+    height: int,
+    contrast_threshold_neg: float,
+    contrast_threshold_pos: float,
+    device: str,
+) -> Callable[
+    [],
+    tuple[
+        Callable[[torch.Tensor, int], None],
+        Callable[[torch.Tensor, int], int],
+    ],
+]:
+    def factory() -> tuple[
+        Callable[[torch.Tensor, int], None],
+        Callable[[torch.Tensor, int], int],
+    ]:
+        sim = EventSimulator(
+            width=width,
+            height=height,
+            contrast_threshold_neg=contrast_threshold_neg,
+            contrast_threshold_pos=contrast_threshold_pos,
+            device=device,
+        )
+
+        def init_fn(first_frame: torch.Tensor, _first_ts: int) -> None:
+            sim.init(first_frame)
+
+        def step_fn(frame: torch.Tensor, ts: int) -> int:
+            events = sim(frame, ts)
+            if events is None:
+                return 0
+            return int(events.x.numel())
+
+        return init_fn, step_fn
+
+    return factory
+
+
+def make_vid2e_runner_factory(
+    width: int,
+    height: int,
+    contrast_threshold_neg: float,
+    contrast_threshold_pos: float,
+    device: str,
+) -> Callable[
+    [],
+    tuple[
+        Callable[[torch.Tensor, int], None],
+        Callable[[torch.Tensor, int], int],
+    ],
+]:
+    from thirdparty.cu_rpg_vid2e_esim import EventSimulatorVID2E_ESIM  # noqa: E402
+
+    def factory() -> tuple[
+        Callable[[torch.Tensor, int], None],
+        Callable[[torch.Tensor, int], int],
+    ]:
+        sim = EventSimulatorVID2E_ESIM(
+            W=width,
+            H=height,
+            start_time=0,
+            first_image=None,
+            contrast_threshold_neg=contrast_threshold_neg,
+            contrast_threshold_pos=contrast_threshold_pos,
+            device=device,
+        )
+
+        def init_fn(first_frame: torch.Tensor, _first_ts: int) -> None:
+            sim.reset(first_image=first_frame)
+
+        def step_fn(frame: torch.Tensor, ts: int) -> int:
+            events = sim.image_callback(frame, ts)
+            if events is None:
+                return 0
+            return int(events[0].numel())
+
+        return init_fn, step_fn
+
+    return factory
 
 
 def main() -> None:
@@ -603,56 +694,131 @@ def main() -> None:
             show=args.sanity_show,
         )
 
-    trials: list[TrialResult] = []
-    for i in range(args.trials):
-        result = run_single_trial(
-            trial_index=i + 1,
+    backend_factories: dict[
+        str,
+        Callable[
+            [],
+            tuple[
+                Callable[[torch.Tensor, int], None],
+                Callable[[torch.Tensor, int], int],
+            ],
+        ],
+    ] = {
+        "neurosim_cu_esim": make_neurosim_runner_factory(
             width=args.width,
             height=args.height,
-            fps_timestamp=args.fps_timestamp,
-            warmup_calls=args.warmup_calls,
-            latency_calls=args.latency_calls,
-            frame_bank=frame_bank,
             contrast_threshold_neg=args.contrast_threshold_neg,
             contrast_threshold_pos=args.contrast_threshold_pos,
             device=args.device,
-            gpu_index=gpu_index,
-            gpu_util_poll_interval_s=args.gpu_util_poll_interval_s,
         )
-        trials.append(result)
+    }
 
+    if args.compare_vid2e:
+        try:
+            backend_factories["cu_rpg_vid2e_esim"] = make_vid2e_runner_factory(
+                width=args.width,
+                height=args.height,
+                contrast_threshold_neg=args.contrast_threshold_neg,
+                contrast_threshold_pos=args.contrast_threshold_pos,
+                device=args.device,
+            )
+        except Exception as exc:
+            print(
+                "Warning: could not enable cu_rpg_vid2e_esim comparison: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+    backend_results: dict[str, dict[str, object]] = {}
+
+    for backend_name, backend_factory in backend_factories.items():
+        print(f"\n=== Running backend: {backend_name} ===")
+        trials: list[TrialResult] = []
+
+        for i in range(args.trials):
+            result = run_single_trial(
+                backend=backend_name,
+                trial_index=i + 1,
+                width=args.width,
+                height=args.height,
+                fps_timestamp=args.fps_timestamp,
+                warmup_calls=args.warmup_calls,
+                latency_calls=args.latency_calls,
+                frame_bank=frame_bank,
+                runner_factory=backend_factory,
+                gpu_index=gpu_index,
+                gpu_util_poll_interval_s=args.gpu_util_poll_interval_s,
+            )
+            trials.append(result)
+
+            print(
+                f"Trial {result.trial_index}: "
+                f"{result.calls_khz:.2f} kHz, "
+                f"{result.events_mev_per_sec:.2f} Mev/s, "
+                f"latency {result.avg_forward_latency_us:.2f} us, "
+                f"GPU util mean/peak "
+                f"{result.gpu_util_mean_pct if result.gpu_util_mean_pct is not None else 'n/a'}"
+                f"/"
+                f"{result.gpu_util_peak_pct if result.gpu_util_peak_pct is not None else 'n/a'} %"
+            )
+
+        summary = summarize_trials(trials)
+        backend_results[backend_name] = {
+            "trials": [asdict(t) for t in trials],
+            "summary": summary,
+        }
+
+        print(f"\n=== Summary ({backend_name}) ===")
         print(
-            f"Trial {result.trial_index}: "
-            f"{result.calls_khz:.2f} kHz, "
-            f"{result.events_mev_per_sec:.2f} Mev/s, "
-            f"latency {result.avg_forward_latency_us:.2f} us, "
-            f"GPU util mean/peak "
-            f"{result.gpu_util_mean_pct if result.gpu_util_mean_pct is not None else 'n/a'}"
+            f"Calls/sec: {summary['calls_khz_mean']:.2f} ± "
+            f"{summary['calls_khz_std']:.2f} kHz"
+        )
+        print(
+            f"Events/sec: {summary['events_mev_per_sec_mean']:.2f} ± "
+            f"{summary['events_mev_per_sec_std']:.2f} Mev/s"
+        )
+        print(f"Events/call: {summary['events_per_call_mean']:.2f}")
+        print(
+            f"Forward latency: {summary['latency_us_mean']:.2f} ± "
+            f"{summary['latency_us_std']:.2f} us"
+        )
+        print(
+            f"GPU util mean/peak: "
+            f"{summary['gpu_util_mean_pct'] if summary['gpu_util_mean_pct'] is not None else 'n/a'}"
             f"/"
-            f"{result.gpu_util_peak_pct if result.gpu_util_peak_pct is not None else 'n/a'} %"
+            f"{summary['gpu_util_peak_pct'] if summary['gpu_util_peak_pct'] is not None else 'n/a'} %"
         )
 
-    summary = summarize_trials(trials)
+    primary_backend = "neurosim_cu_esim"
+    primary = backend_results[primary_backend]
+    primary_summary = primary["summary"]
 
-    print("\n=== Summary ===")
-    print(
-        f"Calls/sec: {summary['calls_khz_mean']:.2f} ± {summary['calls_khz_std']:.2f} kHz"
-    )
-    print(
-        f"Events/sec: {summary['events_mev_per_sec_mean']:.2f} ± "
-        f"{summary['events_mev_per_sec_std']:.2f} Mev/s"
-    )
-    print(f"Events/call: {summary['events_per_call_mean']:.2f}")
-    print(
-        f"Forward latency: {summary['latency_us_mean']:.2f} ± "
-        f"{summary['latency_us_std']:.2f} us"
-    )
-    print(
-        f"GPU util mean/peak: "
-        f"{summary['gpu_util_mean_pct'] if summary['gpu_util_mean_pct'] is not None else 'n/a'}"
-        f"/"
-        f"{summary['gpu_util_peak_pct'] if summary['gpu_util_peak_pct'] is not None else 'n/a'} %"
-    )
+    comparisons: dict[str, dict[str, float]] = {}
+    for backend_name, result in backend_results.items():
+        if backend_name == primary_backend:
+            continue
+        summary = result["summary"]
+        comparisons[backend_name] = {
+            "calls_khz_speedup_vs_backend": (
+                primary_summary["calls_khz_mean"] / summary["calls_khz_mean"]
+            ),
+            "events_mev_per_sec_speedup_vs_backend": (
+                primary_summary["events_mev_per_sec_mean"]
+                / summary["events_mev_per_sec_mean"]
+            ),
+            "latency_speedup_vs_backend": (
+                summary["latency_us_mean"] / primary_summary["latency_us_mean"]
+            ),
+        }
+
+    if comparisons:
+        print("\n=== Relative speedup (higher is better) ===")
+        for backend_name, cmp in comparisons.items():
+            print(
+                f"vs {backend_name}: "
+                f"calls {cmp['calls_khz_speedup_vs_backend']:.2f}x, "
+                f"events/sec {cmp['events_mev_per_sec_speedup_vs_backend']:.2f}x, "
+                f"latency {cmp['latency_speedup_vs_backend']:.2f}x"
+            )
 
     out_path = Path(args.output_json)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -666,8 +832,10 @@ def main() -> None:
             "torch_version": torch.__version__,
             "gpu_index": gpu_index,
         },
-        "trials": [asdict(t) for t in trials],
-        "summary": summary,
+        "trials": primary["trials"],
+        "summary": primary_summary,
+        "backends": backend_results,
+        "comparisons": comparisons,
     }
 
     with out_path.open("w", encoding="utf-8") as f:
