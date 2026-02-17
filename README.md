@@ -180,6 +180,28 @@ ruff check .
 ruff format --check .
 ```
 
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@misc{das2026neurosim,
+      title={Neurosim: A Fast Simulator for Neuromorphic Robot Perception}, 
+      author={Richeek Das and Pratik Chaudhari},
+      year={2026},
+      eprint={2602.15018},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2602.15018}, 
+}
+```
+
+and checkout [Neurosim](https://github.com/grasp-lyrl/neurosim) for the full simulator codebase.
+
+## Issues
+
+Please report any bugs or feature requests on GitHub issues. Pull requests are also welcome!
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) for details.
