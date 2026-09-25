@@ -38,15 +38,15 @@ def main():
     )
     sim = GracaDVSSimulator(
         width=args.width, height=args.height, add_noise=args.noise,
-        dt_us=args.dt_us, input_max=1.0, contrast_threshold=0.25,
+        contrast_threshold=0.25,
         max_events=args.width * args.height * 16, seed=0, device="cuda",
     )
 
     step_us = int(round(1e6 / args.fps))
     xs, ys, ts, ps = [], [], [], []
-    sim.forward(bank[0], 0)                       # init
+    sim.forward(bank[0] * 1e-12, 0)                       # init
     for i in range(1, args.frames):
-        ev = sim.forward(bank[i], i * step_us)
+        ev = sim.forward(bank[i] * 1e-12, i * step_us)
         if ev is None:
             continue
         xs.append(ev.x.cpu().numpy()); ys.append(ev.y.cpu().numpy())

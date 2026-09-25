@@ -38,10 +38,10 @@ def run(intensity, dt_us, n_frames, frame_us, theta, p, rng, stochastic, add_noi
     """Single constant-illumination pixel; returns events per second."""
     Cpd, Cfb, Cpr, Csf, Ipr, Isf = p['Cpd'], p['Cfb'], p['Cpr'], p['Csf'], p['Ipr'], p['Isf']
     kfb, ksf, VA, UT = p['kappa_fb'], p['kappa_sf'], p['VA'], p['UT']
-    full_well_saturation_threshold, dark_current, imax = p['full_well_saturation_threshold'], p['dark_current'], p['input_max']
+    full_well_saturation_threshold, dark_current = p['full_well_saturation_threshold'], p['dark_current']
     refr = p['refractory_us']
 
-    Ipd = min(max(full_well_saturation_threshold*intensity/imax, dark_current), full_well_saturation_threshold)
+    Ipd = min(max(intensity, dark_current), full_well_saturation_threshold)
     Ts = dt_us*1e-6; K0 = 2.0/Ts
     gs_fb = Ipd/UT; gm_fb = kfb*Ipd/UT; gm_amp = kfb*Ipr/UT
     Rout = VA/(2*Ipr); Aloop = gm_amp*Rout*gm_fb/gs_fb; Rin = 1/gs_fb
@@ -121,8 +121,8 @@ def run(intensity, dt_us, n_frames, frame_us, theta, p, rng, stochastic, add_noi
 if __name__ == "__main__":
     p = dict(Cpd=71.54e-15, Cfb=0.87e-15, Cpr=23.72e-15, Csf=581e-15, Ipr=3e-9, Isf=10e-12,
              kappa_fb=0.7, kappa_sf=0.7, VA=3.0, UT=25.8e-3,
-             full_well_saturation_threshold=1e-12, dark_current=10e-15, input_max=1.0, refractory_us=1.0)
-    intensity = 1e-2                     # -> Ipd ~ 10 fA (with dark_current floor)
+             full_well_saturation_threshold=1e-12, dark_current=10e-15, refractory_us=1.0)
+    intensity = 1e-14                    # -> Ipd ~ 10 fA (with dark_current floor)
     TC = 0.07
     theta = TC*p['kappa_sf']*p['UT']/p['kappa_fb']
     sigma_hint = None

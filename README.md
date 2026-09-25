@@ -7,6 +7,8 @@ Algorithms are implemented as fused CUDA kernels with warp-level aggregation.
 
 🚀 VoltmeterSimulator mode achieves **~250×–675× faster** than [Lin et al., *DVS-Voltmeter*, ECCV 2022](https://github.com/Lynn0306/DVS-Voltmeter) (~21,000 calls/s vs. 31 calls/s CPU / 84 calls/s GPU). Check [DVS-Voltmeter](#dvs-voltmeter-stochastic-model)
 
+🚀 GracaDVSSimulator mode implements the physically-realistic model from [Graca & Delbruck, *Towards a physically realistic computationally efficient DVS pixel model*, 2025](https://arxiv.org/abs/2505.07386). Check [Graca DVS Model](#graca-dvs-model)
+
 
 <p align="center">
     <img src="assets/example.gif" alt="Example output — moving texture stimulus and generated events (20 ms aggregation)" style="width:90%;" />
@@ -32,6 +34,7 @@ Algorithms are implemented as fused CUDA kernels with warp-level aggregation.
   - [Quick start](#quick-start)
     - [Multi-event mode](#multi-event-mode)
   - [DVS-Voltmeter (stochastic model)](#dvs-voltmeter-stochastic-model)
+  - [Graca DVS Model (physically-realistic)](#graca-dvs-model)
   - [API reference](#api-reference)
     - [`EventSimulator(width, height, ...)`](#eventsimulatorwidth-height-)
     - [`EventSimulator.forward(image, timestamp_us) -> Events | None`](#eventsimulatorforwardimage-timestamp_us---events--none)
@@ -164,6 +167,27 @@ sim = DVSVoltmeterSimulator(
 events = sim(frame_0_255_float.cuda(), timestamp_us)
 ```
 
+## Graca DVS Model (physically-realistic)
+
+A continuous-time physically realistic event simulator based on [Graca & Delbruck, *Towards a physically realistic computationally efficient DVS pixel model*, 2025](https://arxiv.org/abs/2505.07386). 
+This model uses a dynamic linear parameter-varying (LPV) state-space to accurately capture the low-pass behavior of the photoreceptor, asymmetric temporal bandwidths, and voltage noise, resolving artifacts seen in log-contrast models at high frequencies.
+
+Input is **photocurrent in Amperes** (typically `1e-15` to `1e-12`), not 0-255 or log-intensity. For example, if you have a `[0, 1]` or `[0, 255]` image, you should scale it to the physical photocurrent range:
+
+```python
+from neurosim_cu_esim import GracaDVSSimulator
+
+sim = GracaDVSSimulator(
+    width=640, height=480,
+    full_well_saturation_threshold=1e-12,
+    dark_current=1e-15,
+    device="cuda",
+)
+# Example: scale a [0, 255] frame to [0, 1e-12] Amperes
+photocurrent = (frame_0_255_float.cuda() / 255.0) * 1e-12
+events = sim(photocurrent, timestamp_us)
+```
+
 ## API reference
 
 ### `EventSimulator(width, height, ...)`
@@ -210,6 +234,7 @@ print(sim.buffer_memory_bytes)    # GPU memory used by output buffers
 python3 scripts/benchmark_esim.py                                     # ESIM single (default)
 python3 scripts/benchmark_esim.py --mode multi                        # ESIM multi
 python3 scripts/benchmark_esim.py --mode voltmeter --randomize-phase  # DVS-Voltmeter
+python3 scripts/benchmark_esim.py --mode graca                        # Graca model
 ```
 
 **Reported metrics:** calls/sec (kHz), events/sec (Mev/s), events/call, mean forward latency (CUDA event timing), mean/peak GPU utilisation (`nvidia-smi` polling). Saved to `benchmarks/esim_benchmark_results.json`.
@@ -221,6 +246,7 @@ python3 scripts/benchmark_esim.py --mode voltmeter --randomize-phase  # DVS-Volt
 | `single` — ESIM, ≤1 event/pixel/frame (default) | 47.5 kHz | 21 µs | 18 017 | 856 Mev/s |
 | `multi` — ESIM, many events/pixel (low-fps) | 46.2 kHz | 22 µs | 21 668 | 1 002 Mev/s |
 | `voltmeter` — DVS-Voltmeter stochastic | 39.3 kHz | 25 µs | 18 024 | 709 Mev/s |
+| `graca` — Graca physically-realistic | *TBD* | *TBD* | *TBD* | *TBD* |
 
 **Throughput on an RTX 4070 Laptop** (640×480, 1000 fps timestamps, fp32, 3 trials × 200 k forwards):
 
@@ -229,6 +255,7 @@ python3 scripts/benchmark_esim.py --mode voltmeter --randomize-phase  # DVS-Volt
 | `single` — ESIM, ≤1 event/pixel/frame (default) | 37.0 kHz | 27 µs | 18 017 | 667 Mev/s |
 | `multi` — ESIM, many events/pixel (low-fps) | 33.7 kHz | 30 µs | 21 669 | 729 Mev/s |
 | `voltmeter` — DVS-Voltmeter stochastic | 21.1 kHz | 47 µs | 18 186 | 383 Mev/s |
+| `graca` — Graca physically-realistic | *TBD* | *TBD* | *TBD* | *TBD* |
 
 Voltmeter is ~1.2–1.7× the latency of ESIM (per-pixel RNG + IG/Lévy sampling) but still tens of kHz at VGA — far above the reference PyTorch implementation (~84 Hz GPU-patched, ~31 Hz CPU).
 

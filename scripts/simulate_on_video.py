@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 import torch
 
-from neurosim_cu_esim import EventSimulator, DVSVoltmeterSimulator
+from neurosim_cu_esim import EventSimulator, DVSVoltmeterSimulator, GracaDVSSimulator
 
 
 def parse_args():
@@ -33,8 +33,9 @@ def parse_args():
     p.add_argument(
         "--mode",
         default="voltmeter",
-        choices=["single", "multi", "voltmeter"],
-        help="Event model: 'voltmeter' (DVS-Voltmeter stochastic) or the ESIM "
+        choices=["single", "multi", "voltmeter", "graca"],
+        help="Event model: 'voltmeter' (DVS-Voltmeter stochastic), "
+        "'graca' (Graca & Delbruck physically-realistic model), or the ESIM "
         "log-contrast model in 'single'/'multi' mode.",
     )
     p.add_argument("--camera-type", default="DVS346", choices=["DVS346", "DVS240"])
@@ -94,6 +95,13 @@ def main():
             seed=args.seed,
             device="cuda",
         )
+    elif args.mode == "graca":
+        sim = GracaDVSSimulator(
+            width=w,
+            height=h,
+            max_events=w * h * 16,
+            device="cuda",
+        )
     else:
         # ESIM log-contrast model. multi can emit many events/pixel/frame.
         max_events = w * h * 16 if args.mode == "multi" else None
@@ -151,8 +159,10 @@ def main():
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, (w, h), interpolation=cv2.INTER_AREA)
         gray_f = torch.from_numpy(gray).float().cuda()  # linear 0-255
-        if args.mode != "voltmeter":
+        if args.mode not in ["voltmeter", "graca"]:
             gray_f = gray_f.clamp_(min=1.0)  # ESIM takes log(); avoid log(0)
+        elif args.mode == "graca":
+            gray_f = (gray_f / 255.0) * 1e-12  # Graca wants absolute photocurrent in Amperes
         ts = int(round(i * dt_us))
 
         ev = sim.forward(gray_f, ts)  # first call inits and returns None

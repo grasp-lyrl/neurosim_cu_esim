@@ -24,7 +24,7 @@ from dataclasses import asdict, dataclass
 import torch
 import numpy as np
 
-from neurosim_cu_esim import EventSimulator, DVSVoltmeterSimulator
+from neurosim_cu_esim import EventSimulator, DVSVoltmeterSimulator, GracaDVSSimulator
 
 
 @dataclass
@@ -233,8 +233,8 @@ def stream_sanity_frames(
     def sim_input(frame):
         return frame if input_scale == 1.0 else frame * input_scale
 
-    # Voltmeter needs prev_time set; init it through forward (frame at t=0).
-    if mode == "voltmeter":
+    # Voltmeter and Graca need prev_time set; init through forward (frame at t=0).
+    if mode in ("voltmeter", "graca"):
         sim(sim_input(frame_bank[0]), 0)
     else:
         sim.init(frame_bank[0])
@@ -321,6 +321,14 @@ def animate_sanity_check(
             device=device,
         )
         input_scale = 255.0  # frame bank is [0,1]; voltmeter wants 0-255
+    elif mode == "graca":
+        sim = GracaDVSSimulator(
+            width=width,
+            height=height,
+            max_events=width * height * max_events_per_pixel,
+            device=device,
+        )
+        input_scale = 1e-12  # frame bank is [0,1]; graca wants Amperes (e.g. 1e-12)
     else:
         max_events = width * height * max_events_per_pixel if mode == "multi" else None
         sim = EventSimulator(
@@ -420,6 +428,14 @@ def run_single_trial(
             device=device,
         )
         # Init via forward (sets prev_time); the init frame sits at t=0.
+        sim(frame_bank[0], 0)
+    elif mode == "graca":
+        sim = GracaDVSSimulator(
+            width=width,
+            height=height,
+            max_events=width * height * max_events_per_pixel,
+            device=device,
+        )
         sim(frame_bank[0], 0)
     else:
         # In "multi" mode a frame step can emit several events per pixel, so the
@@ -526,11 +542,11 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         type=str,
         default="single",
-        choices=["single", "multi", "voltmeter"],
+        choices=["single", "multi", "voltmeter", "graca"],
         help="Event generation mode: 'single' (<=1 event/pixel/frame, fast "
         "high-fps path), 'multi' (many events/pixel for large log-contrast "
-        "changes, low-fps), or 'voltmeter' (stochastic DVS-Voltmeter model, "
-        "linear-intensity input)",
+        "changes, low-fps), 'voltmeter' (stochastic DVS-Voltmeter model, "
+        "linear-intensity input), or 'graca' (physically-realistic model)",
     )
     parser.add_argument(
         "--max-events-per-pixel",
@@ -685,6 +701,8 @@ def main() -> None:
             f"leak_scale={args.leak_scale}, randomize_phase={args.randomize_phase}, "
             f"max_events = W*H*{args.max_events_per_pixel})"
         )
+    elif args.mode == "graca":
+        print(f"Mode: graca (max_events = W*H*{args.max_events_per_pixel})")
     else:
         print("Mode: single")
 
@@ -716,11 +734,14 @@ def main() -> None:
             seed=args.seed,
         )
 
-    # The DVS-Voltmeter k-params are calibrated to 8-bit linear intensity, but
-    # the frame bank is generated in [0.1, 1.0]; rescale to [0, 255] for it.
+    # the frame bank is generated in [0.1, 1.0]; rescale appropriately
     bench_bank = frame_bank
     if args.mode == "voltmeter":
-        bench_bank = [f * 255.0 for f in frame_bank]
+        for f in bench_bank:
+            f.mul_(255.0)
+    elif args.mode == "graca":
+        for f in bench_bank:
+            f.mul_(1e-12)
 
     trials: list[TrialResult] = []
     for i in range(args.trials):
