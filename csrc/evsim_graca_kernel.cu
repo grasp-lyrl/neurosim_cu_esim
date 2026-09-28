@@ -149,7 +149,7 @@ __global__ void evsim_graca_kernel(
         const double da1    = tau_pd + tau_pr;
 
         // Zm: H(s) = (N1_Zm*s + 1) / (da2*s^2 + da1*s + 1)   [DC gain = 1]
-        const double N1_Zm = Cfb / gm_amp_n;
+        const double N1_Zm = -(Cfb / gm_amp_n);
         double zb0, zb1, zb2, za1, za2;
         bilinear2(N1_Zm, 1.0, da2, da1, K0, zb0, zb1, zb2, za1, za2);
 
@@ -310,18 +310,22 @@ __global__ void evsim_graca_kernel(
             const float dp = vsf_prev - Vref;     // detector value previous step
             int   pol = -1;                        // -1 none, 1 ON, 0 OFF
 
-            if (d >= (float)thr_on)         { pol = 1; }
-            else if (d <= -(float)thr_off)  { pol = 0; }
+            // Convert log-contrast threshold to Vsf voltage threshold
+            const float v_thr_on  = (float)(thr_on  * (kappa_sf * UT / kappa_fb));
+            const float v_thr_off = (float)(thr_off * (kappa_sf * UT / kappa_fb));
+
+            if (d >= v_thr_on)         { pol = 1; }
+            else if (d <= -v_thr_off)  { pol = 0; }
             else if (use_fpt && msi_stored > 0.0f) {
                 // Two independent Bernoulli trials (upper / lower barrier)
-                if (dp < (float)thr_on) {
-                    const float P = expf(-2.0f * ((float)thr_on - dp)
-                                         * ((float)thr_on - d) / msi_stored);
+                if (dp < v_thr_on) {
+                    const float P = expf(-2.0f * (v_thr_on - dp)
+                                         * (v_thr_on - d) / msi_stored);
                     if (curand_uniform(&rng) < P) { pol = 1; }
                 }
-                if (pol < 0 && dp > -(float)thr_off) {
-                    const float P = expf(-2.0f * (dp + (float)thr_off)
-                                         * (d + (float)thr_off) / msi_stored);
+                if (pol < 0 && dp > -v_thr_off) {
+                    const float P = expf(-2.0f * (dp + v_thr_off)
+                                         * (d + v_thr_off) / msi_stored);
                     if (curand_uniform(&rng) < P) { pol = 0; }
                 }
             }
