@@ -206,7 +206,7 @@ events = sim(photocurrent, timestamp_us)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `image` | `torch.Tensor` | Grayscale `(H, W)` frame, positive values |
+| `image` | `torch.Tensor` | 2D `(H, W)` frame (scale depends on the simulator class; see Input format note) |
 | `timestamp_us` | `int` | Frame timestamp in microseconds |
 
 Returns a named tuple `Events(x, y, t, p)` or `None` if zero events.
