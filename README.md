@@ -92,7 +92,7 @@ pip install -e ".[dev]"
 
 ## Quick start
 
-> **Input format.** All simulators take **linear-intensity** frames, positive values. `EventSimulator` is scale-invariant — any positive range works (`[0, 1]`, `[0, 255]`, ...); the kernel applies `log()` internally. `DVSVoltmeterSimulator` expects **0–255** natively (its `k` params are calibrated to that scale), or pass `input_normalized=True` to feed it `[0, 1]` directly.
+> **Input format.** All simulators take **linear** frames. `EventSimulator` applies `log()` internally, so any positive scale like `[0, 1]` or `[0, 255]` works. `DVSVoltmeterSimulator` expects the `[0, 255]` scale natively (or you can use `[0, 1]` if you pass `input_normalized=True`). `GracaDVSSimulator` is physically realistic and expects **photocurrent in Amperes** (typically `1e-15` to `1e-12`).
 
 ```python
 import torch
