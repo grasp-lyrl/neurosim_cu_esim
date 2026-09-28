@@ -34,7 +34,7 @@ Algorithms are implemented as fused CUDA kernels with warp-level aggregation.
   - [Quick start](#quick-start)
     - [Multi-event mode](#multi-event-mode)
   - [DVS-Voltmeter (stochastic model)](#dvs-voltmeter-stochastic-model)
-  - [Graca DVS Model (physically-realistic)](#graca-dvs-model)
+  - [Graca DVS Model (physically-realistic)](#graca-dvs-model-physically-realistic)
   - [API reference](#api-reference)
     - [`EventSimulator(width, height, ...)`](#eventsimulatorwidth-height-)
     - [`EventSimulator.forward(image, timestamp_us) -> Events | None`](#eventsimulatorforwardimage-timestamp_us---events--none)
