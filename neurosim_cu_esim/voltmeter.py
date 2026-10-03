@@ -111,6 +111,8 @@ class DVSVoltmeterSimulator:
     _event_y_buf: torch.Tensor = field(init=False, repr=False)
     _event_t_buf: torch.Tensor = field(init=False, repr=False)
     _event_p_buf: torch.Tensor = field(init=False, repr=False)
+    _time_counters: torch.Tensor = field(init=False, repr=False)
+    _time_stage: torch.Tensor = field(init=False, repr=False)
     _prev_time: int | None = field(default=None, init=False, repr=False)
     _frame_index: int = field(default=0, init=False, repr=False)
 
@@ -139,6 +141,8 @@ class DVSVoltmeterSimulator:
         self._event_y_buf = torch.empty(self.max_events, dtype=torch.uint16, device=dev)
         self._event_t_buf = torch.empty(self.max_events, dtype=torch.uint64, device=dev)
         self._event_p_buf = torch.empty(self.max_events, dtype=torch.uint8, device=dev)
+        self._time_counters = torch.empty(0, dtype=torch.int32, device=dev)
+        self._time_stage = torch.empty(self.max_events, dtype=torch.int64, device=dev)
 
     def init(self, first_image: torch.Tensor) -> None:
         """Initialise per-pixel state from the first frame (linear intensity)."""
@@ -182,12 +186,13 @@ class DVSVoltmeterSimulator:
         """
         if not self.is_initialised:
             self.init(image)
+        if self._prev_time is None:
             self._prev_time = int(timestamp_us)
             return None
 
         image = self._prepare_image(image)
         ts = int(timestamp_us)
-        prev = self._prev_time if self._prev_time is not None else ts
+        prev = self._prev_time
         if ts <= prev:
             raise ValueError(
                 f"timestamp_us ({ts}) must be > previous timestamp ({prev})"
@@ -199,6 +204,11 @@ class DVSVoltmeterSimulator:
         # Scale down the leakage drift terms to reduce background ON activity.
         k4 = k4 * self.leak_scale
         k5 = k5 * self.leak_scale
+        # the event count and one counter per microsecond of the interval
+        if self._time_counters.numel() < ts - prev + 2:
+            self._time_counters = torch.empty(
+                ts - prev + 2, dtype=torch.int32, device=self.device
+            )
 
         x, y, t, p = evsim_voltmeter_cuda(
             image,
@@ -210,6 +220,8 @@ class DVSVoltmeterSimulator:
             self._event_y_buf,
             self._event_t_buf,
             self._event_p_buf,
+            self._time_counters,
+            self._time_stage,
             float(k1),
             float(k2),
             float(k3),

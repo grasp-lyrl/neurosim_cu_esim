@@ -113,6 +113,8 @@ def evsim_voltmeter_cuda(
     event_y_buf: torch.Tensor,
     event_t_buf: torch.Tensor,
     event_p_buf: torch.Tensor,
+    time_counters: torch.Tensor,
+    time_stage: torch.Tensor,
     k1: float,
     k2: float,
     k3: float,
@@ -141,6 +143,11 @@ def evsim_voltmeter_cuda(
         Per-pixel previous intensity ``L0`` state ``(H, W)``; updated in place.
     delta_vd_res : torch.Tensor
         Per-pixel residual voltage state ``(H, W)``; updated in place.
+    time_counters : torch.Tensor
+        Reusable ``int32`` scratch for the time sort, at least
+        ``new_time - prev_time + 2`` long.
+    time_stage : torch.Tensor
+        Reusable ``int64`` scratch for the time sort, as long as the event buffers.
     k1..k6 : float
         DVS-Voltmeter model parameters (camera-specific calibration).
     seed, frame_index : int
@@ -161,6 +168,8 @@ def evsim_voltmeter_cuda(
         event_y_buf,
         event_t_buf,
         event_p_buf,
+        time_counters,
+        time_stage,
         k1,
         k2,
         k3,
