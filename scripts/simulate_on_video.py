@@ -39,6 +39,13 @@ def parse_args():
     )
     p.add_argument("--camera-type", default="DVS346", choices=["DVS346", "DVS240"])
     p.add_argument(
+        "--sampler",
+        default="exact",
+        choices=["exact", "reference"],
+        help="voltmeter: 'exact' (solves the SDE exactly) or 'reference' "
+        "(the paper's Algorithm 1)",
+    )
+    p.add_argument(
         "--leak-scale",
         type=float,
         default=1.0,
@@ -88,6 +95,7 @@ def main():
             width=w,
             height=h,
             camera_type=args.camera_type,
+            sampler=args.sampler,
             leak_scale=args.leak_scale,
             randomize_phase=args.randomize_phase,
             max_events=w * h * 16,

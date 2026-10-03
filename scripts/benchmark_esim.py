@@ -287,6 +287,7 @@ def animate_sanity_check(
     max_events_per_pixel: int = 32,
     camera_type: str = "DVS346",
     seed: int = 0,
+    sampler: str = "exact",
 ) -> None:
     """Create an MP4 sanity-check animation (frame + 20 ms events)."""
     import matplotlib.pyplot as plt
@@ -316,6 +317,7 @@ def animate_sanity_check(
             width=width,
             height=height,
             camera_type=camera_type,
+            sampler=sampler,
             max_events=width * height * max_events_per_pixel,
             seed=seed,
             device=device,
@@ -404,6 +406,7 @@ def run_single_trial(
     seed: int = 0,
     leak_scale: float = 1.0,
     randomize_phase: bool = False,
+    sampler: str = "exact",
 ) -> TrialResult:
     timestamp_step_us = int(round(1e6 / fps_timestamp))
 
@@ -413,6 +416,7 @@ def run_single_trial(
             width=width,
             height=height,
             camera_type=camera_type,
+            sampler=sampler,
             leak_scale=leak_scale,
             randomize_phase=randomize_phase,
             max_events=width * height * max_events_per_pixel,
@@ -558,6 +562,14 @@ def parse_args() -> argparse.Namespace:
         help="voltmeter mode: random per-pixel initial leakage phase (no "
         "synchronised background flashing)",
     )
+    parser.add_argument(
+        "--sampler",
+        type=str,
+        default="exact",
+        choices=["exact", "reference"],
+        help="voltmeter mode: 'exact' (solves the SDE exactly; frame-rate "
+        "independent) or 'reference' (paper's Algorithm 1)",
+    )
 
     parser.add_argument(
         "--trials", type=int, default=3, help="Number of throughput trials"
@@ -681,8 +693,9 @@ def main() -> None:
         )
     elif args.mode == "voltmeter":
         print(
-            f"Mode: voltmeter (camera={args.camera_type}, seed={args.seed}, "
-            f"leak_scale={args.leak_scale}, randomize_phase={args.randomize_phase}, "
+            f"Mode: voltmeter (camera={args.camera_type}, sampler={args.sampler}, "
+            f"seed={args.seed}, leak_scale={args.leak_scale}, "
+            f"randomize_phase={args.randomize_phase}, "
             f"max_events = W*H*{args.max_events_per_pixel})"
         )
     else:
@@ -714,6 +727,7 @@ def main() -> None:
             max_events_per_pixel=args.max_events_per_pixel,
             camera_type=args.camera_type,
             seed=args.seed,
+            sampler=args.sampler,
         )
 
     # The DVS-Voltmeter k-params are calibrated to 8-bit linear intensity, but
@@ -743,6 +757,7 @@ def main() -> None:
             seed=args.seed,
             leak_scale=args.leak_scale,
             randomize_phase=args.randomize_phase,
+            sampler=args.sampler,
         )
         trials.append(result)
 

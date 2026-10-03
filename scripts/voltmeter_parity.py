@@ -4,7 +4,9 @@ DVS-Voltmeter reference (pure PyTorch).
 The two use different RNGs (cuRAND Philox vs. torch), so exact event-by-event
 match is impossible. Instead we compare *statistics* over a frame sequence on
 identical input: total event count, ON/OFF split, mean timestamp, and the final
-per-pixel residual-voltage state.
+per-pixel residual-voltage state. It runs our ``sampler="reference"``, the port
+of upstream's algorithm; the default ``"exact"`` sampler differs from upstream on
+purpose.
 
 The reference source is fetched into a temp dir at runtime (no vendoring).
 """
@@ -80,6 +82,7 @@ def run_ours(frames, timestamps, h, w, seed=0, dtype=torch.float32):
         width=w,
         height=h,
         camera_type="DVS346",
+        sampler="reference",
         max_events=h * w * 64,
         seed=seed,
         device="cuda",
