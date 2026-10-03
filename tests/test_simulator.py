@@ -426,6 +426,26 @@ class TestMultiMode:
         assert ev_s.x.numel() == h * w  # single: one per pixel
         assert ev_m.x.numel() > ev_s.x.numel()  # multi: several per pixel
 
+    def test_timestamps_sorted(self, device):
+        h, w = 64, 64
+        sim = EventSimulator(width=w, height=h, mode="multi", max_events=w * h * 64)
+        gen = torch.Generator(device=device).manual_seed(0)
+        sim.forward(torch.rand((h, w), device=device, generator=gen) + 0.01, 0)
+        ev = sim.forward(
+            torch.rand((h, w), device=device, generator=gen) * 10 + 0.01, 1000
+        )
+        assert ev is not None
+        t = ev.t.to(torch.int64)
+        assert (t[1:] >= t[:-1]).all(), "events within a frame are not time-ordered"
+
+    def test_zero_interval_events_land_on_frame_time(self, device):
+        h, w = 16, 16
+        sim = EventSimulator(width=w, height=h, mode="multi", max_events=w * h * 64)
+        sim.forward(torch.full((h, w), 0.1, device=device), 1000)
+        ev = sim.forward(torch.full((h, w), 10.0, device=device), 1000)
+        assert ev is not None and ev.x.numel() > h * w
+        assert (ev.t.to(torch.int64) == 1000).all(), "a zero-length interval spread events in time"
+
     def test_no_event_below_threshold(self, device):
         sim = EventSimulator(width=8, height=8, mode="multi")
         frame = torch.full((8, 8), 0.5, device=device)

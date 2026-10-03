@@ -212,14 +212,14 @@ python3 scripts/benchmark_esim.py --mode multi                        # ESIM mul
 python3 scripts/benchmark_esim.py --mode voltmeter --randomize-phase  # DVS-Voltmeter
 ```
 
-**Reported metrics:** calls/sec (kHz), events/sec (Mev/s), events/call, mean forward latency (CUDA event timing), mean/peak GPU utilisation (`nvidia-smi` polling). Saved to `benchmarks/esim_benchmark_results.json`.
+**Reported metrics:** calls/sec (kHz), events/sec (Mev/s), events/call, mean forward latency (CUDA event timing), mean/peak GPU utilization (`nvidia-smi` polling). Saved to `benchmarks/esim_benchmark_results.json`.
 
 **Throughput on an RTX 4090** (640×480, 1000 fps timestamps, fp32, 3 trials × 1 M forwards):
 
 | mode | calls/s | latency | events/call | events/sec |
 |------|--------:|--------:|------------:|-----------:|
 | `single` — ESIM, ≤1 event/pixel/frame (default) | 47.5 kHz | 21 µs | 18 017 | 856 Mev/s |
-| `multi` — ESIM, many events/pixel (low-fps) | 46.2 kHz | 22 µs | 21 668 | 1 002 Mev/s |
+| `multi` — ESIM, many events/pixel | 46.2 kHz | 22 µs | 21 668 | 1 002 Mev/s |
 | `voltmeter` — DVS-Voltmeter stochastic | 39.3 kHz | 25 µs | 18 024 | 709 Mev/s |
 
 **Throughput on an RTX 4070 Laptop** (640×480, 1000 fps timestamps, fp32, 3 trials × 200 k forwards):
@@ -227,7 +227,7 @@ python3 scripts/benchmark_esim.py --mode voltmeter --randomize-phase  # DVS-Volt
 | mode | calls/s | latency | events/call | events/sec |
 |------|--------:|--------:|------------:|-----------:|
 | `single` — ESIM, ≤1 event/pixel/frame (default) | 37.0 kHz | 27 µs | 18 017 | 667 Mev/s |
-| `multi` — ESIM, many events/pixel (low-fps) | 33.7 kHz | 30 µs | 21 669 | 729 Mev/s |
+| `multi` — ESIM, many events/pixel | 33.7 kHz | 30 µs | 21 669 | 729 Mev/s |
 | `voltmeter` — DVS-Voltmeter stochastic | 21.1 kHz | 47 µs | 18 186 | 383 Mev/s |
 
 Voltmeter is ~1.2–1.7× the latency of ESIM (per-pixel RNG + IG/Lévy sampling) but still tens of kHz at VGA — far above the reference PyTorch implementation (~84 Hz GPU-patched, ~31 Hz CPU).

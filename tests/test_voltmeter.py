@@ -78,6 +78,33 @@ class TestForward:
         assert int(t.min()) > 1000
         assert int(t.max()) <= 6000
 
+    @pytest.mark.parametrize("dt", [1000, 2000, 5000])
+    def test_timestamps_sorted(self, device, dt):
+        sim = DVSVoltmeterSimulator(
+            width=64, height=64, seed=1, max_events=64 * 64 * 64
+        )
+        gen = torch.Generator(device=device).manual_seed(0)
+        sim.forward(torch.rand((64, 64), device=device, generator=gen) * 255, 0)
+        ev = sim.forward(torch.rand((64, 64), device=device, generator=gen) * 255, dt)
+        assert ev is not None
+        t = ev.t.to(torch.int64)
+        assert (t[1:] >= t[:-1]).all(), "events within a frame are not time-ordered"
+        assert int(t[0]) >= 0 and int(t[-1]) <= dt, "events left the frame interval"
+
+    def test_saturated_buffer_stays_sorted(self, device):
+        sim = DVSVoltmeterSimulator(width=64, height=64, seed=1, max_events=500)
+        gen = torch.Generator(device=device).manual_seed(0)
+        sim.forward(torch.rand((64, 64), device=device, generator=gen) * 255, 0)
+        ev = sim.forward(torch.rand((64, 64), device=device, generator=gen) * 255, 1000)
+        assert ev is not None and ev.t.numel() == 500
+        t = ev.t.to(torch.int64)
+        assert (t[1:] >= t[:-1]).all(), "a saturated frame is not time-ordered"
+        assert int(t.min()) >= 0 and int(t.max()) <= 1000, "saturation wrote garbage"
+        assert (
+            int(ev.x.to(torch.int64).max()) < 64
+            and int(ev.y.to(torch.int64).max()) < 64
+        )
+
     def test_polarity_positive_on_brightness_increase(self, device):
         sim = DVSVoltmeterSimulator(
             width=64, height=64, seed=2, max_events=64 * 64 * 64
