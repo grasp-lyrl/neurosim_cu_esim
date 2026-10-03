@@ -18,6 +18,16 @@
 //   * numerically stable p_on (no exp overflow), so float32 + --use_fast_math
 //   * events are staged as they are sampled, one atomic per warp for their slots
 //   * events come out time-ordered, via a counting sort on the integer microsecond
+//
+// EXACT = true swaps the reference's sampler (Algorithm 1) for one that solves the
+// same SDE exactly. The reference picks a polarity, draws a single-threshold
+// first-passage time, and when that lands after the frame, moves the residual in a
+// straight line toward the chosen threshold and redraws everything next frame. That
+// discards the diffusion, so the noise shrinks as the frame rate grows, and its
+// sampler for crossings against the drift is biased early. The exact sampler keeps
+// the voltage itself across frames, so the output does not depend on the frame rate,
+// and both polarities come from the same crossing test. It draws its random numbers
+// from counter-based Philox (no curand state), which also makes it the faster one.
 
 #include "time_sort.h"
 #include <curand_kernel.h>
@@ -37,6 +47,11 @@
 #define VOLT_MAX_ITERS 256
 // Philox counter budget per pixel per frame (>= worst-case draws/iter * iters).
 #define VOLT_DRAWS_PER_FRAME 1024
+// Exact sampler: at most this many steps per frame without an event, and an
+// iteration cap that covers them plus VOLT_MAX_EVENTS_PER_PIXEL events. Its
+// random numbers are counted per (pixel, frame), so it needs no draw budget.
+#define VOLT_MAX_SUBSTEPS 32
+#define VOLT_MAX_ITERS_EXACT 80
 // Tuned for 1 kHz frames. For longer frame intervals raise VOLT_MAX_EVENTS_PER_PIXEL (a pixel's events
 // past it are dropped silently); intervals over 2047 us cost the time sort's prefix sum extra passes.
 
@@ -109,7 +124,184 @@ __device__ __forceinline__ T volt_sample_first_passage(
     return (U > mean / (mean + Xig)) ? (mean * mean / Xig) : Xig;
 }
 
-template <typename scalar_t>
+// When a Brownian bridge first reaches a threshold. The bridge starts a > 0 below
+// it, ends d away from it (on either side) after time h, and has variance
+// s2h = sigma^2 h; drift drops out once the endpoint is fixed. With
+// s = tau / (h - tau), s ~ IG(a / d, a^2 / s2h), drawn by Michael-Schucany-Haas
+// from a standard normal nu and a uniform u, in a form that neither cancels nor
+// overflows: r = mean / smaller root.
+template <typename T>
+__device__ __forceinline__ T volt_bridge_hit_time(
+    const T a, T d, const T s2h, const T h, const T nu, const T u
+) {
+    if (a <= static_cast<T>(0)) return static_cast<T>(0);
+    d = fmax(d, static_cast<T>(1e-12));
+    const T q = nu * nu * (s2h / (static_cast<T>(2) * a)) / d;
+    const T r = static_cast<T>(1) + q + sqrt(q) * sqrt(q + static_cast<T>(2));
+    return (u * (static_cast<T>(1) + r) <= r) ? h * a / (a + r * d)      // s = mean / r
+                                              : h * a * r / (a * r + d); // s = mean * r
+}
+
+// The exact sampler's random numbers: counter-based Philox, one 4-word block at a
+// time, keyed by the seed and counted by (block, pixel, frame). Nothing to
+// initialise or carry, so every word drawn is used.
+__device__ __forceinline__ uint4 volt_philox_block(
+    const unsigned long long seed, const unsigned long long frame,
+    const uint32_t pixel, const uint32_t block
+) {
+    return curand_Philox4x32_10(
+        make_uint4(block, pixel, static_cast<uint32_t>(frame),
+                   static_cast<uint32_t>(frame >> 32)),
+        make_uint2(static_cast<uint32_t>(seed), static_cast<uint32_t>(seed >> 32)));
+}
+
+// A uniform in (0, 1] from one word, as curand_uniform makes it.
+__device__ __forceinline__ float volt_u01(const uint32_t w) {
+    return w * CURAND_2POW32_INV + (CURAND_2POW32_INV / 2.0f);
+}
+
+// Algorithm 1 of the reference: pick the polarity with the two-threshold
+// probability, draw that threshold's first-passage time, and if it lands after the
+// frame, move the residual toward the threshold in proportion. Returns the residual.
+__device__ __forceinline__ float volt_run_reference(
+    float res, const float mu, const float sigma, const float dt, const uint64_t dt_us,
+    const int32_t x, const int32_t y, curandStatePhilox4_32_10_t* state,
+    uint64_t* __restrict__ stage, int32_t* __restrict__ counters, const uint32_t max_events
+) {
+    const float s2    = sigma * sigma;
+    const float theta = 1.0f;
+    float start_rel   = 0.0f;
+    int32_t n         = 0;
+
+    #pragma unroll 1
+    for (int iter = 0; iter < VOLT_MAX_ITERS; ++iter) {
+        const float ep_on  = theta - res;
+        const float ep_off = theta + res;
+
+        // Numerically stable two-boundary "on first" probability.
+        float p_on;
+        if (mu == 0.0f) {
+            p_on = 0.5f;
+        } else {
+            const float a = 2.0f * mu * ep_on  / s2;
+            const float b = 2.0f * mu * ep_off / s2;
+            if (mu > 0.0f) {
+                p_on = (1.0f - expf(-b)) / (1.0f - expf(-(a + b)));
+            } else {
+                const float eab = expf(a + b);
+                const float ea  = expf(a);
+                p_on = (eab - ea) / (eab - 1.0f);
+            }
+        }
+        if (isnan(p_on)) p_on = 1.0f;
+        p_on = fminf(fmaxf(p_on, 0.0f), 1.0f);
+
+        const float u  = curand_uniform(state);
+        const bool  on = (u <= p_on);
+        const float ep = on ? ep_on : ep_off;
+        const float c  = on ? mu : -mu;
+
+        const float dts = volt_sample_first_passage(ep, c, sigma, state);
+        // Degenerate draw (NaN/Inf/<=0): stop without poisoning the residual.
+        if (!isfinite(dts) || dts <= 0.0f) break;
+        const float t_hit_rel = start_rel + dts;
+
+        if (t_hit_rel < dt) {
+            append_event(stage, counters, counters + 1, max_events, x, y, on ? 1 : 0,
+                         min(static_cast<uint64_t>(llroundf(t_hit_rel)), dt_us));
+            start_rel = t_hit_rel;
+            res = 0.0f;
+            if (++n >= VOLT_MAX_EVENTS_PER_PIXEL) break;
+        } else {
+            const float sign = on ? 1.0f : -1.0f;
+            res = res + sign * ep * (dt - start_rel) / dts;
+            break;
+        }
+    }
+    return res;
+}
+
+// Exact sampler. v is the voltage since the last reset. Each step draws its end
+// value from the exact Gaussian law, then asks whether the path crossed +theta
+// (ON) or -theta (OFF) on the way: certainly if the end is past it, otherwise with
+// the bridge probability exp(-2 a d / sigma^2 h). A crossing is an event at the
+// bridge's hitting time, after which the voltage resets to 0 and the rest of the
+// interval runs afresh. Steps are capped at sigma sqrt(h) <= theta / 2, so a bridge
+// reaching both thresholds in one step (~exp(-32)) can be ignored and the two
+// tests run separately; noise so strong that this needs more than
+// VOLT_MAX_SUBSTEPS steps gets that many, and the approximation degrades. Returns
+// the voltage at the end of the frame.
+//
+// Each step takes one Philox block: two words make a Box-Muller pair (the end
+// value, and the bridge draw if it crosses) and two the crossing tests. The
+// bridge's acceptance uniform reuses a word: a threshold that is certainly crossed
+// leaves its test word unused, and a test that fails leaves (u - p) / (1 - p)
+// uniform. Only a step that crosses both thresholds needs a second block.
+__device__ __forceinline__ float volt_run_exact(
+    float v, float mu, float sigma, const float dt, const uint64_t dt_us,
+    const int32_t x, const int32_t y, const unsigned long long seed,
+    const unsigned long long frame_index, const uint32_t pixel,
+    uint64_t* __restrict__ stage, int32_t* __restrict__ counters, const uint32_t max_events
+) {
+
+    // A NaN or Inf input pixel makes mu or sigma non-finite. Zero both instead, so
+    // the frame leaves the voltage as it was (as the reference effectively does)
+    // rather than storing NaN and leaving the pixel dead for the rest of the run.
+    const bool finite = isfinite(mu) && isfinite(sigma);
+    mu    = finite ? mu : 0.0f;
+    sigma = finite ? sigma : 0.0f;
+
+    const float s2    = sigma * sigma;
+    const float theta = 1.0f;
+    const float h_max = fmaxf(0.25f * theta * theta / s2, dt / VOLT_MAX_SUBSTEPS);
+    float t_rel       = 0.0f;
+    int32_t n         = 0;
+    uint32_t block    = 0;
+
+    #pragma unroll 1
+    for (int iter = 0; iter < VOLT_MAX_ITERS_EXACT && t_rel < dt; ++iter) {
+        const uint4  w = volt_philox_block(seed, frame_index, pixel, block++);
+        const float2 g = _curand_box_muller(w.x, w.y);
+        const float u_on = volt_u01(w.z), u_off = volt_u01(w.w);
+
+        const float h     = fminf(dt - t_rel, h_max);
+        const float s2h   = s2 * h;
+        const float v_end = v + mu * h + sigma * sqrtf(h) * g.x;
+        const float a_on  = theta - v,     a_off = theta + v;      // start to threshold
+        const float d_on  = theta - v_end, d_off = theta + v_end;  // end to it, <= 0 if past
+        const float p_on  = d_on  <= 0.0f ? 1.0f : expf(-2.0f * a_on  * d_on  / s2h);
+        const float p_off = d_off <= 0.0f ? 1.0f : expf(-2.0f * a_off * d_off / s2h);
+        const bool hit_on  = d_on  <= 0.0f || u_on  < p_on;
+        const bool hit_off = d_off <= 0.0f || u_off < p_off;
+        if (!hit_on && !hit_off) {
+            v = v_end;
+            t_rel += h;
+            continue;
+        }
+        float tau_on = INFINITY, tau_off = INFINITY;
+        if (hit_on && hit_off) {
+            const uint4  w2 = volt_philox_block(seed, frame_index, pixel, block++);
+            const float2 g2 = _curand_box_muller(w2.x, w2.y);
+            tau_on  = volt_bridge_hit_time(a_on, fabsf(d_on), s2h, h, g.y, volt_u01(w2.z));
+            tau_off = volt_bridge_hit_time(a_off, fabsf(d_off), s2h, h, g2.x, volt_u01(w2.w));
+        } else if (hit_on) {
+            const float u = d_on <= 0.0f ? u_on : (u_off - p_off) / (1.0f - p_off);
+            tau_on = volt_bridge_hit_time(a_on, fabsf(d_on), s2h, h, g.y, u);
+        } else {
+            const float u = d_off <= 0.0f ? u_off : (u_on - p_on) / (1.0f - p_on);
+            tau_off = volt_bridge_hit_time(a_off, fabsf(d_off), s2h, h, g.y, u);
+        }
+        const bool on = tau_on <= tau_off;
+        t_rel += fminf(tau_on, tau_off);
+        append_event(stage, counters, counters + 1, max_events, x, y, on ? 1 : 0,
+                     min(static_cast<uint64_t>(llroundf(t_rel)), dt_us));
+        v = 0.0f;
+        if (++n >= VOLT_MAX_EVENTS_PER_PIXEL) break;
+    }
+    return v;
+}
+
+template <typename scalar_t, bool EXACT>
 __global__ void evsim_voltmeter_kernel(
     const torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> new_image,
     const uint64_t  new_time,
@@ -138,71 +330,30 @@ __global__ void evsim_voltmeter_kernel(
         const float dt   = static_cast<float>(dt_us);
 
         const float Dr  = 1.0f / (Lavg + k2);
-        const float mu  = k1 * (dL / dt) * Dr + k4 + k5 * Lavg;
+        // k1 dL / (L + k2) is k1 d ln(L + k2): the reference integrates it at the
+        // midpoint, the exact sampler takes the log difference, so splitting a
+        // brightness change across more frames does not change the event count.
+        const float mu  = (EXACT ? k1 * log1pf(dL / (L0 + k2)) / dt : k1 * (dL / dt) * Dr)
+                        + k4 + k5 * Lavg;
         // NB: paper Eq.(11) is labelled a "variance", but the reference passes
         // it into the `sigma` slot of event_generation (and squares it for
         // sigma^2). So this quantity is the diffusion *std* sigma, not sigma^2.
         const float sigma = k3 * sqrtf(Lavg) * Dr + k6;
-        const float s2    = sigma * sigma;
 
-        curandStatePhilox4_32_10_t state;
+        // Sample this frame's events and persist the state for the next frame.
         const unsigned long long pix = static_cast<unsigned long long>(y) * width + x;
-        curand_init(seed, pix, frame_index * VOLT_DRAWS_PER_FRAME, &state);
-
-        float res         = delta_vd_res[y][x];
-        float start_rel   = 0.0f;
-        int32_t n         = 0;
-        const float theta = 1.0f;
-
-        #pragma unroll 1
-        for (int iter = 0; iter < VOLT_MAX_ITERS; ++iter) {
-            const float ep_on  = theta - res;
-            const float ep_off = theta + res;
-
-            // Numerically stable two-boundary "on first" probability.
-            float p_on;
-            if (mu == 0.0f) {
-                p_on = 0.5f;
-            } else {
-                const float a = 2.0f * mu * ep_on  / s2;
-                const float b = 2.0f * mu * ep_off / s2;
-                if (mu > 0.0f) {
-                    p_on = (1.0f - expf(-b)) / (1.0f - expf(-(a + b)));
-                } else {
-                    const float eab = expf(a + b);
-                    const float ea  = expf(a);
-                    p_on = (eab - ea) / (eab - 1.0f);
-                }
-            }
-            if (isnan(p_on)) p_on = 1.0f;
-            p_on = fminf(fmaxf(p_on, 0.0f), 1.0f);
-
-            const float u  = curand_uniform(&state);
-            const bool  on = (u <= p_on);
-            const float ep = on ? ep_on : ep_off;
-            const float c  = on ? mu : -mu;
-
-            const float dts = volt_sample_first_passage(ep, c, sigma, &state);
-            // Degenerate draw (NaN/Inf/<=0): stop without poisoning the residual.
-            if (!isfinite(dts) || dts <= 0.0f) break;
-            const float t_hit_rel = start_rel + dts;
-
-            if (t_hit_rel < dt) {
-                append_event(stage, counters, counters + 1, max_events, x, y, on ? 1 : 0,
-                             min(static_cast<uint64_t>(llroundf(t_hit_rel)), dt_us));
-                start_rel = t_hit_rel;
-                res = 0.0f;
-                if (++n >= VOLT_MAX_EVENTS_PER_PIXEL) break;
-            } else {
-                const float sign = on ? 1.0f : -1.0f;
-                res = res + sign * ep * (dt - start_rel) / dts;
-                break;
-            }
+        const float res = delta_vd_res[y][x];
+        if constexpr (EXACT) {
+            delta_vd_res[y][x] = volt_run_exact(res, mu, sigma, dt, dt_us, x, y, seed,
+                                                frame_index, static_cast<uint32_t>(pix),
+                                                stage, counters, max_events);
+        } else {
+            curandStatePhilox4_32_10_t state;
+            curand_init(seed, pix, frame_index * VOLT_DRAWS_PER_FRAME, &state);
+            delta_vd_res[y][x] = volt_run_reference(res, mu, sigma, dt, dt_us, x, y, &state,
+                                                    stage, counters, max_events);
         }
-
-        // Persist state for the next frame.
-        delta_vd_res[y][x] = res;
-        base_frame[y][x]   = L1;
+        base_frame[y][x] = L1;
     }
 
 }
@@ -223,7 +374,8 @@ evsim_voltmeter(
     const double k1, const double k2, const double k3,
     const double k4, const double k5, const double k6,
     const uint64_t seed,
-    const uint64_t frame_index
+    const uint64_t frame_index,
+    const bool exact
 ) {
     CHECK_CUDA_CONTIGUOUS_FLOAT(new_image);
     CHECK_CUDA_CONTIGUOUS_FLOAT(base_frame);
@@ -253,7 +405,9 @@ evsim_voltmeter(
     const dim3 blocks(BLOCKS(width, threads.x), BLOCKS(height, threads.y));
 
     AT_DISPATCH_FLOATING_TYPES(new_image.scalar_type(), "evsim_voltmeter_cuda", ([&] {
-        evsim_voltmeter_kernel<scalar_t><<<blocks, threads>>>(
+        auto kernel = exact ? evsim_voltmeter_kernel<scalar_t, true>
+                            : evsim_voltmeter_kernel<scalar_t, false>;
+        kernel<<<blocks, threads>>>(
             new_image.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
             new_time,
             prev_time,

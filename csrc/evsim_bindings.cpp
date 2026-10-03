@@ -55,6 +55,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("k1"), py::arg("k2"), py::arg("k3"),
         py::arg("k4"), py::arg("k5"), py::arg("k6"),
         py::arg("seed"),
-        py::arg("frame_index")
+        py::arg("frame_index"),
+        py::arg("exact")
     );
 }

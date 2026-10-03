@@ -59,7 +59,8 @@ evsim_multi(
 );
 
 // ---- DVS-Voltmeter stochastic model (ECCV 2022). Linear-intensity input;
-//      Brownian-motion-with-drift voltage, Inverse-Gaussian/Levy event times. ----
+//      Brownian-motion-with-drift voltage, Inverse-Gaussian/Levy event times.
+//      exact = false is the reference's sampler, true solves the SDE exactly. ----
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 evsim_voltmeter(
     const torch::Tensor new_image,
@@ -76,5 +77,6 @@ evsim_voltmeter(
     double k1, double k2, double k3,
     double k4, double k5, double k6,
     uint64_t seed,
-    uint64_t frame_index
+    uint64_t frame_index,
+    bool exact
 );
