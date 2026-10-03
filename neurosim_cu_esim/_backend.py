@@ -123,6 +123,7 @@ def evsim_voltmeter_cuda(
     k6: float,
     seed: int,
     frame_index: int,
+    exact: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Call the DVS-Voltmeter stochastic event kernel for one frame step.
 
@@ -153,6 +154,10 @@ def evsim_voltmeter_cuda(
     seed, frame_index : int
         Philox RNG seed and per-frame counter offset (for reproducibility and
         fresh randomness across frames).
+    exact : bool
+        ``True`` (default): the exact sampler, which keeps the voltage itself in
+        ``delta_vd_res`` and solves the SDE exactly, independent of the frame
+        rate. ``False``: the reference's sampler (Algorithm 1).
 
     Returns
     -------
@@ -178,4 +183,5 @@ def evsim_voltmeter_cuda(
         k6,
         seed,
         frame_index,
+        exact,
     )

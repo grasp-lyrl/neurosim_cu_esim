@@ -59,6 +59,27 @@ class DVSVoltmeterSimulator:
         Ignored if ``k`` is given explicitly.
     k : list[float] | None
         Explicit ``[k1, k2, k3, k4, k5, k6]`` override.
+    sampler : str
+        How the voltage process is sampled between frames.
+
+        * ``"exact"`` (default): solves the model's SDE exactly. The voltage
+          itself is carried across frames; each step draws its exact Gaussian
+          increment and tests for a threshold crossing with the Brownian-bridge
+          probability, so ON and OFF crossings come from the same physics, and
+          the output does not depend on the frame rate. The signal drift is
+          integrated as ``k1 * ln((L1 + k2) / (L0 + k2))``, so a brightness step
+          gives the same events however many frames it is split across. It
+          draws its random numbers from counter-based Philox, one block per step
+          with no per-pixel state, and runs faster than the reference on the
+          benchmark's moving scene (~1.5% on an RTX 4090, ~7% on a 4070 Laptop).
+        * ``"reference"``: Algorithm 1 of the paper, matching the upstream
+          code's statistics; use it to compare against upstream. It picks a
+          polarity, draws one threshold's first-passage time, and when that lands
+          after the frame, moves the residual in a straight line toward the
+          threshold and redraws next frame. This throws the diffusion away, so
+          the noise shrinks as the frame rate grows (at 1 kHz the timing jitter
+          is 5-20x below the model's own), and crossings against the drift are
+          timed about 2x too early.
     leak_scale : float
         Multiplier on the leakage *drift* terms ``k4`` (thermal) and ``k5``
         (brightness-proportional parasitic photocurrent), which together cause
@@ -97,6 +118,7 @@ class DVSVoltmeterSimulator:
     height: int
     camera_type: str = "DVS346"
     k: list[float] | None = None
+    sampler: str = "exact"
     leak_scale: float = 1.0
     randomize_phase: bool = False
     input_normalized: bool = False
@@ -126,6 +148,10 @@ class DVSVoltmeterSimulator:
             self.k = list(CAMERA_PRESETS[self.camera_type])
         if len(self.k) != 6:
             raise ValueError(f"k must have 6 elements, got {len(self.k)}")
+        if self.sampler not in ("reference", "exact"):
+            raise ValueError(
+                f"Unknown sampler {self.sampler!r}; choose 'exact' or 'reference'"
+            )
         if self.max_events is None:
             self.max_events = self.width * self.height * 16
         self._init_buffers()
@@ -230,6 +256,7 @@ class DVSVoltmeterSimulator:
             float(k6),
             int(self.seed),
             int(self._frame_index),
+            self.sampler == "exact",
         )
 
         self._prev_time = ts

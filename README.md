@@ -5,7 +5,7 @@ Algorithms are implemented as fused CUDA kernels with warp-level aggregation.
 
 ✨ EventSimulator mode achieves **~11× better throughput** and **~10× lower latency** than [rpg_vid2e](https://github.com/uzh-rpg/rpg_vid2e) esim CUDA implementation. Check [Quickstart](#quick-start)
 
-🚀 VoltmeterSimulator mode achieves **~250×–675× faster** than [Lin et al., *DVS-Voltmeter*, ECCV 2022](https://github.com/Lynn0306/DVS-Voltmeter) (~21,000 calls/s vs. 31 calls/s CPU / 84 calls/s GPU). Check [DVS-Voltmeter](#dvs-voltmeter-stochastic-model)
+🚀 VoltmeterSimulator mode achieves **~240×–650× faster** than [Lin et al., *DVS-Voltmeter*, ECCV 2022](https://github.com/Lynn0306/DVS-Voltmeter) (~20,000 calls/s vs. 31 calls/s CPU / 84 calls/s GPU). Check [DVS-Voltmeter](#dvs-voltmeter-stochastic-model)
 
 
 <p align="center">
@@ -20,7 +20,7 @@ Algorithms are implemented as fused CUDA kernels with warp-level aggregation.
     <em>Example event simulation using DVSVoltmeterSimulator on a real video</em>
 </p>
 
-**Forward latency at 640×480 on an RTX 4090:** `single` ~21 µs · `multi` ~22 µs · `voltmeter` ~25 µs — all **much faster** than the corresponding reference implementations. See [Benchmarking](#benchmarking) for details.
+**Forward latency at 640×480 on an RTX 4090:** `single` ~21 µs · `multi` ~27 µs · `voltmeter` ~29 µs — all **much faster** than the corresponding reference implementations. See [Benchmarking](#benchmarking) for details.
 
 ## Contents
 
@@ -146,7 +146,7 @@ beyond the cap are dropped (with a warning).
 
 ## DVS-Voltmeter (stochastic model)
 
-A separate, **stochastic** event simulator based on [Lin et al., *DVS-Voltmeter*, ECCV 2022](https://github.com/Lynn0306/DVS-Voltmeter). Each pixel's sensor voltage is modelled as **Brownian motion with drift** (paper Eq. 10/11), and events are sampled at threshold crossings — so timestamps carry realistic shot-noise jitter, and a calibrated **leakage current** produces background ON events.
+A separate, **stochastic** event simulator based on [Lin et al., *DVS-Voltmeter*, ECCV 2022](https://github.com/Lynn0306/DVS-Voltmeter). Each pixel's sensor voltage is modelled as **Brownian motion with drift** (paper Eq. 10/11), and events are sampled at threshold crossings. A calibrated **leakage current** produces background ON events.
 
 Input is **linear intensity** (0–255 — the scale the `k` params are calibrated to), not log:
 
@@ -156,6 +156,7 @@ from neurosim_cu_esim import DVSVoltmeterSimulator
 sim = DVSVoltmeterSimulator(
     width=640, height=480,
     camera_type="DVS346",     # or "DVS240"; or pass k=[k1..k6] explicitly
+    sampler="exact",          # default; or "reference" (see below)
     randomize_phase=True,     # random per-pixel leakage phase
                               # (avoids synchronised background flashes)
     leak_scale=1.0,           # 1.0=faithful; lower to suppress bg ON events
@@ -163,6 +164,8 @@ sim = DVSVoltmeterSimulator(
 )
 events = sim(frame_0_255_float.cuda(), timestamp_us)
 ```
+
+**`sampler`.** `"exact"` (the default) carries each pixel's voltage across frames and advances it with the exact law of the model's SDE, testing for crossings with a Brownian bridge. Its event rates, ON/OFF split and timing match closed-form Brownian motion at any frame interval from 100 µs to 1 s. It integrates the signal drift as `k1·ln((L1+k2)/(L0+k2))`, so a brightness step gives the same events however many frames it is split across. It is also faster than `"reference"` on the benchmark below (~1.5% on the 4090, ~7% on the 4070 Laptop), because it draws its random numbers statelessly, one Philox block per step. `"reference"` reproduces the paper's Algorithm 1 and the upstream code's statistics; `scripts/voltmeter_parity.py` checks it against upstream. It throws away the voltage's random walk at every frame boundary, so the noise shrinks as the frame rate grows. At 1 kHz, timestamp jitter is 5–20× below what the model itself predicts, and noise strong enough to give 27% OFF events gives none. It also times crossings against the drift (OFF during brightening or leakage) about 2× too early.
 
 ## API reference
 
@@ -214,23 +217,23 @@ python3 scripts/benchmark_esim.py --mode voltmeter --randomize-phase  # DVS-Volt
 
 **Reported metrics:** calls/sec (kHz), events/sec (Mev/s), events/call, mean forward latency (CUDA event timing), mean/peak GPU utilization (`nvidia-smi` polling). Saved to `benchmarks/esim_benchmark_results.json`.
 
-**Throughput on an RTX 4090** (640×480, 1000 fps timestamps, fp32, 3 trials × 1 M forwards):
+**Throughput on an RTX 4090** (640×480, 1000 fps timestamps, fp32, 3 trials × 1 M forwards; voltmeter row with the default `exact` sampler, `reference` measured ~1.5% slower back to back):
 
 | mode | calls/s | latency | events/call | events/sec |
 |------|--------:|--------:|------------:|-----------:|
-| `single` — ESIM, ≤1 event/pixel/frame (default) | 47.5 kHz | 21 µs | 18 017 | 856 Mev/s |
-| `multi` — ESIM, many events/pixel | 46.2 kHz | 22 µs | 21 668 | 1 002 Mev/s |
-| `voltmeter` — DVS-Voltmeter stochastic | 39.3 kHz | 25 µs | 18 024 | 709 Mev/s |
+| `single` — ESIM, ≤1 event/pixel/frame (default) | 48.7 kHz | 21 µs | 18 017 | 878 Mev/s |
+| `multi` — ESIM, many events/pixel | 37.2 kHz | 27 µs | 21 668 | 806 Mev/s |
+| `voltmeter` — DVS-Voltmeter stochastic | 34.0 kHz | 29 µs | 18 364 | 625 Mev/s |
 
-**Throughput on an RTX 4070 Laptop** (640×480, 1000 fps timestamps, fp32, 3 trials × 200 k forwards):
+**Throughput on an RTX 4070 Laptop** (640×480, 1000 fps timestamps, fp32, 3 trials × 200 k forwards; voltmeter row with the default `exact` sampler, `reference` measured ~7% slower back to back):
 
 | mode | calls/s | latency | events/call | events/sec |
 |------|--------:|--------:|------------:|-----------:|
-| `single` — ESIM, ≤1 event/pixel/frame (default) | 37.0 kHz | 27 µs | 18 017 | 667 Mev/s |
-| `multi` — ESIM, many events/pixel | 33.7 kHz | 30 µs | 21 669 | 729 Mev/s |
-| `voltmeter` — DVS-Voltmeter stochastic | 21.1 kHz | 47 µs | 18 186 | 383 Mev/s |
+| `single` — ESIM, ≤1 event/pixel/frame (default) | 38.3 kHz | 26 µs | 18 017 | 690 Mev/s |
+| `multi` — ESIM, many events/pixel | 28.1 kHz | 36 µs | 21 668 | 608 Mev/s |
+| `voltmeter` — DVS-Voltmeter stochastic | 20.1 kHz | 50 µs | 18 364 | 370 Mev/s |
 
-Voltmeter is ~1.2–1.7× the latency of ESIM (per-pixel RNG + IG/Lévy sampling) but still tens of kHz at VGA — far above the reference PyTorch implementation (~84 Hz GPU-patched, ~31 Hz CPU).
+The voltmeter's latency is ~1.1–1.4× ESIM's on the 4090 and ~1.4–1.9× on the 4070 (per-pixel RNG + threshold-crossing sampling), but it still runs at tens of kHz at VGA — far above the reference PyTorch implementation (~84 Hz GPU-patched, ~31 Hz CPU).
 
 ### **Sanity animation** (frame + aggregated events MP4):
 
