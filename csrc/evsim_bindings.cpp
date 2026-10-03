@@ -50,6 +50,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("event_y_buf"),
         py::arg("event_t_buf"),
         py::arg("event_p_buf"),
+        py::arg("time_counters"),
+        py::arg("time_stage"),
         py::arg("k1"), py::arg("k2"), py::arg("k3"),
         py::arg("k4"), py::arg("k5"), py::arg("k6"),
         py::arg("seed"),

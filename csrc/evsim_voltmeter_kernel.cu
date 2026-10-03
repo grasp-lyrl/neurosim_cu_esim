@@ -16,12 +16,11 @@
 //   * counter-based Philox RNG, no stored per-pixel RNG state
 //   * relative-time arithmetic in float (avoids large-magnitude precision loss)
 //   * numerically stable p_on (no exp overflow), so float32 + --use_fast_math
-//   * one fused kernel launch; warp prefix-sum for variable-count output
+//   * events are staged as they are sampled, one atomic per warp for their slots
+//   * events come out time-ordered, via a counting sort on the integer microsecond
 
-#include "utils.h"
+#include "time_sort.h"
 #include <curand_kernel.h>
-
-#define FULL_MASK 0xffffffff
 
 // Guard in case the CUDA <math.h> in use does not expose these.
 #ifndef M_SQRT2
@@ -31,14 +30,15 @@
 #define M_SQRT1_2 0.70710678118654752440
 #endif
 
-// Hard per-pixel cap on stored events per frame (local buffer size). Kept small
-// because it lives in per-thread local memory (stack) and inflates occupancy
-// cost; a frame step rarely produces more than a few events per pixel.
+// Hard per-pixel cap on events per frame; a frame step rarely produces more than
+// a few events per pixel.
 #define VOLT_MAX_EVENTS_PER_PIXEL 16
 // Hard loop-iteration cap (defends against degenerate tiny-dt floods).
 #define VOLT_MAX_ITERS 256
 // Philox counter budget per pixel per frame (>= worst-case draws/iter * iters).
 #define VOLT_DRAWS_PER_FRAME 1024
+// Tuned for 1 kHz frames. For longer frame intervals raise VOLT_MAX_EVENTS_PER_PIXEL (a pixel's events
+// past it are dropped silently); intervals over 2047 us cost the time sort's prefix sum extra passes.
 
 // ---- precision helpers (templated so fp64/fp16 can be added later) --------
 __device__ __forceinline__ float  volt_erfinv(float x)  { return erfinvf(x); }
@@ -116,11 +116,8 @@ __global__ void evsim_voltmeter_kernel(
     const uint64_t  prev_time,
     torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> base_frame,
     torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> delta_vd_res,
-    torch::PackedTensorAccessor32<uint16_t, 1, torch::RestrictPtrTraits> event_x_buf,
-    torch::PackedTensorAccessor32<uint16_t, 1, torch::RestrictPtrTraits> event_y_buf,
-    torch::PackedTensorAccessor32<uint64_t, 1, torch::RestrictPtrTraits> event_t_buf,
-    torch::PackedTensorAccessor32<uint8_t,  1, torch::RestrictPtrTraits> event_p_buf,
-    int32_t* __restrict__ event_count,
+    uint64_t* __restrict__ stage,
+    int32_t* __restrict__ counters,
     const float k1, const float k2, const float k3,
     const float k4, const float k5, const float k6,
     const unsigned long long seed,
@@ -129,20 +126,16 @@ __global__ void evsim_voltmeter_kernel(
     const uint16_t height,
     const uint16_t width
 ) {
-    const int32_t x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int32_t y = blockIdx.y * blockDim.y + threadIdx.y;
+    const int32_t  x     = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t  y     = blockIdx.y * blockDim.y + threadIdx.y;
+    const uint64_t dt_us = new_time - prev_time;
 
-    int32_t  n = 0;                                  // events stored by this pixel
-    float    loc_t[VOLT_MAX_EVENTS_PER_PIXEL];
-    uint8_t  loc_p[VOLT_MAX_EVENTS_PER_PIXEL];
-
-    // Out-of-bounds lanes contribute n = 0 but still join the warp shuffles.
     if (x < width && y < height) {
         const float L0 = base_frame[y][x];
         const float L1 = new_image[y][x];
         const float dL   = L1 - L0;
         const float Lavg = (L1 + L0) * 0.5f;
-        const float dt   = static_cast<float>(new_time - prev_time);
+        const float dt   = static_cast<float>(dt_us);
 
         const float Dr  = 1.0f / (Lavg + k2);
         const float mu  = k1 * (dL / dt) * Dr + k4 + k5 * Lavg;
@@ -158,6 +151,7 @@ __global__ void evsim_voltmeter_kernel(
 
         float res         = delta_vd_res[y][x];
         float start_rel   = 0.0f;
+        int32_t n         = 0;
         const float theta = 1.0f;
 
         #pragma unroll 1
@@ -194,14 +188,11 @@ __global__ void evsim_voltmeter_kernel(
             const float t_hit_rel = start_rel + dts;
 
             if (t_hit_rel < dt) {
-                if (n < VOLT_MAX_EVENTS_PER_PIXEL) {
-                    loc_t[n] = t_hit_rel;
-                    loc_p[n] = on ? 1 : 0;
-                    n++;
-                }
+                append_event(stage, counters, counters + 1, max_events, x, y, on ? 1 : 0,
+                             min(static_cast<uint64_t>(llroundf(t_hit_rel)), dt_us));
                 start_rel = t_hit_rel;
                 res = 0.0f;
-                if (n >= VOLT_MAX_EVENTS_PER_PIXEL) break;
+                if (++n >= VOLT_MAX_EVENTS_PER_PIXEL) break;
             } else {
                 const float sign = on ? 1.0f : -1.0f;
                 res = res + sign * ep * (dt - start_rel) / dts;
@@ -214,38 +205,6 @@ __global__ void evsim_voltmeter_kernel(
         base_frame[y][x]   = L1;
     }
 
-    // ------ Warp prefix-sum: variable per-lane count -> contiguous slots ------
-    const uint32_t tid     = threadIdx.y * blockDim.x + threadIdx.x;
-    const int8_t   lane_id = tid & 31;
-
-    int32_t scan = n;
-    #pragma unroll
-    for (int offset = 1; offset < 32; offset <<= 1) {
-        const int32_t v = __shfl_up_sync(FULL_MASK, scan, offset);
-        if (lane_id >= offset) scan += v;
-    }
-    const int32_t warp_total = __shfl_sync(FULL_MASK, scan, 31);
-
-    if (warp_total > 0) {
-        int32_t warp_base = 0;
-        if (lane_id == 0)
-            warp_base = atomicAdd(event_count, warp_total);
-        warp_base = __shfl_sync(FULL_MASK, warp_base, 0);
-
-        if (n > 0) {
-            const int32_t my_base = warp_base + (scan - n);  // exclusive prefix
-            for (int32_t k = 0; k < n; ++k) {
-                const int32_t idx = my_base + k;
-                if (idx < static_cast<int32_t>(max_events)) {
-                    event_x_buf[idx] = static_cast<uint16_t>(x);
-                    event_y_buf[idx] = static_cast<uint16_t>(y);
-                    event_t_buf[idx] = prev_time +
-                        static_cast<uint64_t>(llroundf(loc_t[k]));
-                    event_p_buf[idx] = loc_p[k];
-                }
-            }
-        }
-    }
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -259,6 +218,8 @@ evsim_voltmeter(
     torch::Tensor event_y_buf,
     torch::Tensor event_t_buf,
     torch::Tensor event_p_buf,
+    torch::Tensor time_counters,
+    torch::Tensor time_stage,
     const double k1, const double k2, const double k3,
     const double k4, const double k5, const double k6,
     const uint64_t seed,
@@ -271,6 +232,8 @@ evsim_voltmeter(
     CHECK_CUDA_CONTIGUOUS(event_y_buf);
     CHECK_CUDA_CONTIGUOUS(event_t_buf);
     CHECK_CUDA_CONTIGUOUS(event_p_buf);
+    CHECK_CUDA_CONTIGUOUS(time_counters);
+    CHECK_CUDA_CONTIGUOUS(time_stage);
 
     TORCH_CHECK(new_image.dim() == 2,    "new_image must be 2-D (H, W)");
     TORCH_CHECK(base_frame.dim() == 2,   "base_frame must be 2-D (H, W)");
@@ -280,11 +243,9 @@ evsim_voltmeter(
     const uint16_t height     = static_cast<uint16_t>(new_image.size(0));
     const uint16_t width      = static_cast<uint16_t>(new_image.size(1));
     const uint32_t max_events = static_cast<uint32_t>(event_x_buf.size(0));
+    TORCH_CHECK(time_stage.numel() >= max_events, "time_stage must hold max_events events");
+    zero_time_counters(time_counters, new_time - prev_time);
 
-    auto event_count = torch::zeros(
-        {1}, torch::dtype(torch::kInt32).device(new_image.device()));
-
-    // A warp is one full 32-pixel row, keeping the warp prefix-sum intact.
     // NB: the templated kernel supports float64 too, but it is register-heavy;
     // a double launch at 1024 threads exceeds the register budget, so fp32 is
     // the supported/used precision (the Python simulator feeds float32).
@@ -298,11 +259,8 @@ evsim_voltmeter(
             prev_time,
             base_frame.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
             delta_vd_res.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-            event_x_buf.packed_accessor32<uint16_t, 1, torch::RestrictPtrTraits>(),
-            event_y_buf.packed_accessor32<uint16_t, 1, torch::RestrictPtrTraits>(),
-            event_t_buf.packed_accessor32<uint64_t, 1, torch::RestrictPtrTraits>(),
-            event_p_buf.packed_accessor32<uint8_t,  1, torch::RestrictPtrTraits>(),
-            event_count.data_ptr<int32_t>(),
+            reinterpret_cast<uint64_t*>(time_stage.data_ptr<int64_t>()),
+            time_counters.data_ptr<int32_t>(),
             static_cast<float>(k1), static_cast<float>(k2), static_cast<float>(k3),
             static_cast<float>(k4), static_cast<float>(k5), static_cast<float>(k6),
             static_cast<unsigned long long>(seed),
@@ -316,11 +274,9 @@ evsim_voltmeter(
     auto cuda_err = cudaGetLastError();
     TORCH_CHECK(cuda_err == cudaSuccess,
                 "CUDA kernel launch failed: ", cudaGetErrorString(cuda_err));
-    cudaDeviceSynchronize();
 
-    const int32_t num_events =
-        std::min(event_count[0].item<int32_t>(),
-                 static_cast<int32_t>(max_events));
+    const int32_t num_events = scatter_by_time(
+        time_counters, time_stage, prev_time, new_time - prev_time, event_x_buf, event_y_buf, event_t_buf, event_p_buf);
 
     if (num_events == 0) {
         auto opts_u16 = torch::dtype(torch::kUInt16).device(new_image.device());

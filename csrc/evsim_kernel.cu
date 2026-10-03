@@ -6,7 +6,7 @@
 // contrast threshold. Warp-level ballot/prefix-sum is used to aggregate
 // events so that only one atomic per warp is needed.
 
-#include "utils.h"
+#include "time_sort.h"
 
 #define FULL_MASK 0xffffffff
 
@@ -93,11 +93,6 @@ __global__ void evsim_kernel(
 // whose log-intensity jumps by N contrast thresholds emits N events.  Their
 // timestamps are spread equally across the inter-frame interval
 // [prev_time, new_time], with the last event landing exactly on new_time.
-//
-// Because the per-pixel count is variable, the warp aggregation uses a
-// __shfl_up_sync inclusive prefix-sum over per-lane counts (rather than a
-// ballot/popc) so each lane learns its contiguous write offset; still only one
-// atomicAdd per warp.
 template <typename scalar_t>
 __global__ void evsim_multi_kernel(
     const torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> new_image,
@@ -105,11 +100,8 @@ __global__ void evsim_multi_kernel(
     const uint64_t  prev_time,
     torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> intensity_state_ub,
     torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits> intensity_state_lb,
-    torch::PackedTensorAccessor32<uint16_t, 1, torch::RestrictPtrTraits> event_x_buf,
-    torch::PackedTensorAccessor32<uint16_t, 1, torch::RestrictPtrTraits> event_y_buf,
-    torch::PackedTensorAccessor32<uint64_t, 1, torch::RestrictPtrTraits> event_t_buf,
-    torch::PackedTensorAccessor32<uint8_t,  1, torch::RestrictPtrTraits> event_p_buf,
-    int32_t* __restrict__ event_count,
+    uint64_t* __restrict__ stage,
+    int32_t* __restrict__ counters,
     const float contrast_threshold_neg,
     const float contrast_threshold_pos,
     const uint32_t max_events,
@@ -122,8 +114,6 @@ __global__ void evsim_multi_kernel(
     int32_t n         = 0;      // number of events this pixel emits this step
     bool    pos_event = false;
 
-    // NOTE: out-of-bounds lanes intentionally do NOT return early — they must
-    // still take part in the warp-wide shuffles below (contributing n = 0).
     if (x < width && y < height) {
         const scalar_t cur_log = log(new_image[y][x]);
         const scalar_t ub_raw  = intensity_state_ub[y][x];
@@ -137,7 +127,7 @@ __global__ void evsim_multi_kernel(
             // Substitute stale -inf bounds (carry-over from a prior log(0) frame
             // or from init() on a frame with zeros) with finite recovery values.
             // After this, diff = cur_log - ub / lb - cur_log is guaranteed finite,
-            // so the floorf -> int32 cast can't blow up and corrupt the warp sum.
+            // so the floorf -> int32 cast can't blow up.
             const scalar_t ub = isfinite(ub_raw) ? ub_raw
                 : cur_log + static_cast<scalar_t>(contrast_threshold_pos);
             const scalar_t lb = isfinite(lb_raw) ? lb_raw
@@ -182,43 +172,11 @@ __global__ void evsim_multi_kernel(
         }
     }
 
-    // ------ Warp-level prefix-sum to allocate contiguous output slots ------
-    const uint32_t tid     = threadIdx.y * blockDim.x + threadIdx.x;
-    const int8_t   lane_id = tid & 31;
-
-    // Inclusive scan of per-lane counts across the 32 lanes.
-    int32_t scan = n;
-    #pragma unroll
-    for (int offset = 1; offset < 32; offset <<= 1) {
-        const int32_t v = __shfl_up_sync(FULL_MASK, scan, offset);
-        if (lane_id >= offset) scan += v;
-    }
-    const int32_t warp_total = __shfl_sync(FULL_MASK, scan, 31);
-
-    if (warp_total > 0) {
-        int32_t warp_base = 0;
-        if (lane_id == 0)
-            warp_base = atomicAdd(event_count, warp_total);
-        warp_base = __shfl_sync(FULL_MASK, warp_base, 0);
-
-        if (n > 0) {
-            const int32_t  my_base = warp_base + (scan - n);  // exclusive prefix
-            const uint64_t gap     = new_time - prev_time;
-            const uint8_t  pol     = pos_event ? 1 : 0;
-
-            for (int32_t k = 0; k < n; ++k) {
-                const int32_t idx = my_base + k;
-                if (idx < static_cast<int32_t>(max_events)) {
-                    // Equally spaced; the k = n-1 event lands exactly on new_time.
-                    const uint64_t t = prev_time
-                        + (gap * static_cast<uint64_t>(k + 1)) / static_cast<uint64_t>(n);
-                    event_x_buf[idx] = static_cast<uint16_t>(x);
-                    event_y_buf[idx] = static_cast<uint16_t>(y);
-                    event_t_buf[idx] = t;
-                    event_p_buf[idx] = pol;
-                }
-            }
-        }
+    // Equally spaced; the k = n-1 event lands exactly on new_time.
+    const uint64_t gap = new_time - prev_time;
+    for (int32_t k = 0; k < n; ++k) {
+        const uint64_t t_rel = (gap * static_cast<uint64_t>(k + 1)) / static_cast<uint64_t>(n);
+        append_event(stage, counters, counters + 1, max_events, x, y, pos_event ? 1 : 0, t_rel);
     }
 }
 
@@ -338,8 +296,8 @@ evsim_multi(
     const uint16_t width      = static_cast<uint16_t>(new_image.size(1));
     const uint32_t max_events = static_cast<uint32_t>(event_x_buf.size(0));
 
-    auto event_count = torch::zeros(
-        {1}, torch::dtype(torch::kInt32).device(new_image.device()));
+    auto counters = time_sort_counters(new_image, new_time - prev_time);
+    auto stage    = time_sort_stage(new_image, max_events);
 
     const dim3 threads(32, 32);
     const dim3 blocks(BLOCKS(width, threads.x), BLOCKS(height, threads.y));
@@ -351,11 +309,8 @@ evsim_multi(
             prev_time,
             intensity_state_ub.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
             intensity_state_lb.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-            event_x_buf.packed_accessor32<uint16_t, 1, torch::RestrictPtrTraits>(),
-            event_y_buf.packed_accessor32<uint16_t, 1, torch::RestrictPtrTraits>(),
-            event_t_buf.packed_accessor32<uint64_t, 1, torch::RestrictPtrTraits>(),
-            event_p_buf.packed_accessor32<uint8_t,  1, torch::RestrictPtrTraits>(),
-            event_count.data_ptr<int32_t>(),
+            reinterpret_cast<uint64_t*>(stage.data_ptr<int64_t>()),
+            counters.data_ptr<int32_t>(),
             contrast_threshold_neg,
             contrast_threshold_pos,
             max_events,
@@ -367,11 +322,9 @@ evsim_multi(
     auto cuda_err = cudaGetLastError();
     TORCH_CHECK(cuda_err == cudaSuccess,
                 "CUDA kernel launch failed: ", cudaGetErrorString(cuda_err));
-    cudaDeviceSynchronize();
 
-    const int32_t num_events =
-        std::min(event_count[0].item<int32_t>(),
-                 static_cast<int32_t>(max_events));
+    const int32_t num_events = scatter_by_time(
+        counters, stage, prev_time, new_time - prev_time, event_x_buf, event_y_buf, event_t_buf, event_p_buf);
 
     if (num_events == 0) {
         auto opts_u16 = torch::dtype(torch::kUInt16).device(new_image.device());

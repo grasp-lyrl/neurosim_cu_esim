@@ -71,6 +71,8 @@ evsim_voltmeter(
     torch::Tensor event_y_buf,
     torch::Tensor event_t_buf,
     torch::Tensor event_p_buf,
+    torch::Tensor time_counters,
+    torch::Tensor time_stage,
     double k1, double k2, double k3,
     double k4, double k5, double k6,
     uint64_t seed,
