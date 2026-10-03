@@ -444,7 +444,9 @@ class TestMultiMode:
         sim.forward(torch.full((h, w), 0.1, device=device), 1000)
         ev = sim.forward(torch.full((h, w), 10.0, device=device), 1000)
         assert ev is not None and ev.x.numel() > h * w
-        assert (ev.t.to(torch.int64) == 1000).all(), "a zero-length interval spread events in time"
+        assert (ev.t.to(torch.int64) == 1000).all(), (
+            "a zero-length interval spread events in time"
+        )
 
     def test_no_event_below_threshold(self, device):
         sim = EventSimulator(width=8, height=8, mode="multi")
