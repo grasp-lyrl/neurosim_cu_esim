@@ -96,7 +96,12 @@ class DVSVoltmeterSimulator:
         phase spreads the background events uniformly in time (a realistic
         desynchronised sparkle), as a real sensor's pixels would be.  Strongly
         recommended for realistic stationary backgrounds; default ``False`` to
-        match the reference.
+        match the reference.  With ``sampler="exact"`` each pixel's voltage is
+        drawn from the process's own steady state for the first frame's
+        brightness, so the background is stationary from the first frame: a
+        uniform phase on ``[0, 1)`` when leakage dominates, spreading to a tent
+        on ``(-1, 1)`` as noise takes over. (A uniform phase with strong noise
+        would give tens of seconds of excess ON events at the start.)
     input_normalized : bool
         If ``True``, frames are assumed to be in ``[0, 1]`` and are multiplied
         by 255 internally (the ``k`` params are calibrated to the 0-255 scale).
@@ -174,7 +179,9 @@ class DVSVoltmeterSimulator:
         """Initialise per-pixel state from the first frame (linear intensity)."""
         first_image = self._prepare_image(first_image)
         self._base_frame = first_image.clone().contiguous()
-        if self.randomize_phase:
+        if self.randomize_phase and self.sampler == "exact":
+            self._delta_vd_res = self._stationary_voltage(first_image).contiguous()
+        elif self.randomize_phase:
             # Random sub-threshold residual per pixel (threshold = 1) so pixels
             # start at different points in their leakage cycle -> no phase-locked
             # background flashing. Seeded for reproducibility.
@@ -187,6 +194,43 @@ class DVSVoltmeterSimulator:
             ).contiguous()
         else:
             self._delta_vd_res = torch.zeros_like(first_image).contiguous()
+
+    def _stationary_voltage(self, image: torch.Tensor) -> torch.Tensor:
+        """Draw each pixel's voltage from the steady state of the exact sampler's
+        process for a static pixel at this brightness.
+
+        The voltage drifts at ``mu``, diffuses at ``sigma`` and resets to 0 on
+        reaching +-1. With ``c = 2 mu / sigma^2 >= 0`` its steady-state density
+        is ``exp(c y) - exp(-c)`` on (-1, 0] and ``1 - exp(-c (1 - y))`` on
+        (0, 1) (mirrored for c < 0): uniform on [0, 1) as c grows, a tent on
+        (-1, 1) as c -> 0. Its peak, at 0, equals its area, so drawing y uniform
+        on (-1, 1) and keeping it with probability density / peak accepts half
+        the draws whatever c is.
+        """
+        k1, k2, k3, k4, k5, k6 = self.k  # type: ignore[misc]
+        L = image.double()
+        mu = (k4 + k5 * L) * self.leak_scale
+        sigma = k3 * torch.sqrt(L.clamp(min=0)) / (L + k2) + k6
+        c = torch.nan_to_num(2 * mu / sigma**2, nan=1e6)  # mu = sigma = 0: never moves
+        flip = c < 0
+        c = c.abs().clamp(1e-12, 1e6)
+        peak = -torch.expm1(-c)
+        gen = torch.Generator(device=image.device).manual_seed(int(self.seed))
+
+        def rand() -> torch.Tensor:
+            return torch.rand(c.shape, generator=gen, device=c.device, dtype=c.dtype)
+
+        v = torch.zeros_like(c)
+        todo = torch.ones_like(c, dtype=torch.bool)
+        while todo.any():
+            y = 2 * rand() - 1
+            density = torch.where(
+                y <= 0, torch.expm1(c * y) - torch.expm1(-c), -torch.expm1(-c * (1 - y))
+            )
+            keep = todo & (rand() * peak < density)
+            v = torch.where(keep, y, v)
+            todo &= ~keep
+        return torch.where(flip, -v, v).to(image.dtype)
 
     @property
     def is_initialised(self) -> bool:
