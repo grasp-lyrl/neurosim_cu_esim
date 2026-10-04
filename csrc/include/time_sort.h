@@ -6,6 +6,9 @@
 // writes them to the output buffers in time order.
 //
 // Counters: [0] event count, [1 : interval_us + 2] events per microsecond of the interval.
+//
+// The host functions expect the tensors' GPU to be current (their callers hold a
+// CUDAGuard) and run on PyTorch's current stream there.
 
 #include "utils.h"
 #include <cooperative_groups.h>

@@ -30,6 +30,8 @@
 // from counter-based Philox (no curand state), which also makes it the faster one.
 
 #include "time_sort.h"
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <curand_kernel.h>
 
 // Guard in case the CUDA <math.h> in use does not expose these.
@@ -392,6 +394,11 @@ evsim_voltmeter(
     TORCH_CHECK(delta_vd_res.dim() == 2, "delta_vd_res must be 2-D (H, W)");
     TORCH_CHECK(new_time > prev_time,    "new_time must be > prev_time");
 
+    // Run on the input's GPU and on PyTorch's current stream there, not on
+    // whichever GPU is current in the calling thread.
+    const c10::cuda::CUDAGuard device_guard(new_image.device());
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
     const uint16_t height     = static_cast<uint16_t>(new_image.size(0));
     const uint16_t width      = static_cast<uint16_t>(new_image.size(1));
     const uint32_t max_events = static_cast<uint32_t>(event_x_buf.size(0));
@@ -407,7 +414,7 @@ evsim_voltmeter(
     AT_DISPATCH_FLOATING_TYPES(new_image.scalar_type(), "evsim_voltmeter_cuda", ([&] {
         auto kernel = exact ? evsim_voltmeter_kernel<scalar_t, true>
                             : evsim_voltmeter_kernel<scalar_t, false>;
-        kernel<<<blocks, threads>>>(
+        kernel<<<blocks, threads, 0, stream>>>(
             new_image.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
             new_time,
             prev_time,

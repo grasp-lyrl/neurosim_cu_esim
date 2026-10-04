@@ -7,6 +7,8 @@
 // events so that only one atomic per warp is needed.
 
 #include "time_sort.h"
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #define FULL_MASK 0xffffffff
 
@@ -206,6 +208,11 @@ evsim(
     TORCH_CHECK(intensity_state_ub.dim() == 2,  "intensity_state_ub must be 2-D (H, W)");
     TORCH_CHECK(intensity_state_lb.dim() == 2,  "intensity_state_lb must be 2-D (H, W)");
 
+    // Run on the input's GPU and on PyTorch's current stream there, not on
+    // whichever GPU is current in the calling thread.
+    const c10::cuda::CUDAGuard device_guard(new_image.device());
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
     const uint16_t height     = static_cast<uint16_t>(new_image.size(0));
     const uint16_t width      = static_cast<uint16_t>(new_image.size(1));
     const uint32_t max_events = static_cast<uint32_t>(event_x_buf.size(0));
@@ -217,7 +224,7 @@ evsim(
     const dim3 blocks(BLOCKS(width, threads.x), BLOCKS(height, threads.y));
 
     AT_DISPATCH_FLOATING_TYPES(new_image.scalar_type(), "evsim_cuda", ([&] {
-        evsim_kernel<scalar_t><<<blocks, threads>>>(
+        evsim_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
             new_image.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
             new_time,
             intensity_state_ub.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
@@ -292,6 +299,11 @@ evsim_multi(
     TORCH_CHECK(intensity_state_lb.dim() == 2,  "intensity_state_lb must be 2-D (H, W)");
     TORCH_CHECK(new_time >= prev_time,          "new_time must be >= prev_time");
 
+    // Run on the input's GPU and on PyTorch's current stream there, not on
+    // whichever GPU is current in the calling thread.
+    const c10::cuda::CUDAGuard device_guard(new_image.device());
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
     const uint16_t height     = static_cast<uint16_t>(new_image.size(0));
     const uint16_t width      = static_cast<uint16_t>(new_image.size(1));
     const uint32_t max_events = static_cast<uint32_t>(event_x_buf.size(0));
@@ -303,7 +315,7 @@ evsim_multi(
     const dim3 blocks(BLOCKS(width, threads.x), BLOCKS(height, threads.y));
 
     AT_DISPATCH_FLOATING_TYPES(new_image.scalar_type(), "evsim_multi_cuda", ([&] {
-        evsim_multi_kernel<scalar_t><<<blocks, threads>>>(
+        evsim_multi_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
             new_image.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
             new_time,
             prev_time,

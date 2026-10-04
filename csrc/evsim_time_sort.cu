@@ -1,6 +1,7 @@
 // neurosim_cu_esim — time sort shared by the multi-event and Voltmeter kernels.
 
 #include "time_sort.h"
+#include <ATen/cuda/CUDAContext.h>
 #include <cub/block/block_scan.cuh>
 
 // One block scans TIME_SORT_THREADS * 2 bins per pass: a frame interval up to
@@ -72,7 +73,8 @@ void zero_time_counters(torch::Tensor counters, const uint64_t interval_us) {
     const int64_t size = 2 + static_cast<int64_t>(interval_us);
     TORCH_CHECK(counters.numel() >= size,
                 "time counters hold ", counters.numel(), " ints, the interval needs ", size);
-    cudaMemsetAsync(counters.data_ptr<int32_t>(), 0, size * sizeof(int32_t));
+    cudaMemsetAsync(counters.data_ptr<int32_t>(), 0, size * sizeof(int32_t),
+                    at::cuda::getCurrentCUDAStream());
 }
 
 torch::Tensor time_sort_stage(const torch::Tensor& like, const uint32_t max_events) {
@@ -91,12 +93,13 @@ int32_t scatter_by_time(
     torch::Tensor event_t_buf,
     torch::Tensor event_p_buf
 ) {
-    const uint32_t max_events  = static_cast<uint32_t>(event_x_buf.size(0));
-    int32_t*       event_count = counters.data_ptr<int32_t>();
+    const uint32_t     max_events  = static_cast<uint32_t>(event_x_buf.size(0));
+    int32_t*           event_count = counters.data_ptr<int32_t>();
+    const cudaStream_t stream      = at::cuda::getCurrentCUDAStream();
 
-    time_offsets_kernel<<<1, TIME_SORT_THREADS>>>(
+    time_offsets_kernel<<<1, TIME_SORT_THREADS, 0, stream>>>(
         event_count + 1, static_cast<int64_t>(interval_us) + 1);
-    time_scatter_kernel<<<TIME_SORT_SCATTER_BLOCKS, 256>>>(
+    time_scatter_kernel<<<TIME_SORT_SCATTER_BLOCKS, 256, 0, stream>>>(
         reinterpret_cast<const uint64_t*>(stage.data_ptr<int64_t>()),
         event_count,
         event_count + 1,
@@ -111,9 +114,10 @@ int32_t scatter_by_time(
     TORCH_CHECK(cuda_err == cudaSuccess,
                 "CUDA kernel launch failed: ", cudaGetErrorString(cuda_err));
 
-    // Blocking on the default stream, so this also waits for the event kernels.
+    // Queued behind the event kernels on the same stream. Into pageable host memory
+    // the copy returns only once it is done, so it also waits for those kernels.
     int32_t count = 0;
-    cuda_err = cudaMemcpy(&count, event_count, sizeof(int32_t), cudaMemcpyDeviceToHost);
+    cuda_err = cudaMemcpyAsync(&count, event_count, sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
     TORCH_CHECK(cuda_err == cudaSuccess, "CUDA event kernels failed: ", cudaGetErrorString(cuda_err));
     return std::min(count, static_cast<int32_t>(max_events));
 }
