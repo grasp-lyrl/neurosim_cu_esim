@@ -265,6 +265,27 @@ class TestExactSampler:
         assert t[on].mean() == pytest.approx(math.tanh(pe / 2) / mu, rel=0.03)
         assert t[~on].mean() / t[on].mean() == pytest.approx(1.0, abs=0.08)
 
+    def test_randomize_phase_starts_in_steady_state(self, device):
+        """Noise comparable to the leak: a uniform start phase gave ~89% ON for the
+        first 10 s against 60% in steady state."""
+        mu, sigma = 9.8e-9, 2.16e-4
+        k = [K1, K2, 0.0, mu, 0.0, sigma]
+        sim = DVSVoltmeterSimulator(
+            width=128, height=128, k=k, sampler="exact", randomize_phase=True, seed=0
+        )
+        frame = torch.full((128, 128), 128.0, device=device)
+        sim.forward(frame, 0)
+        n = n_on = 0
+        for i in range(1, 1001):  # the first 10 s, in 10 ms frames
+            ev = sim.forward(frame, i * 10_000)
+            if ev is not None:
+                n += ev.p.numel()
+                n_on += int(ev.p.to(torch.int64).sum())
+        steady_on = 1 / (1 + math.exp(-2 * mu / sigma**2))  # 0.604
+        steady_rate = 1e6 * mu / math.tanh(mu / sigma**2)  # 0.047 events/px/s
+        assert n_on / n == pytest.approx(steady_on, abs=0.03)
+        assert n / (128 * 128) / 10 == pytest.approx(steady_rate, rel=0.08)
+
     def test_step_count_independent_of_frame_split(self, device):
         """A 20 -> 180 brightness step gives the same events whether it arrives in
         one 50 ms frame or spread over 50 frames (the reference gives 7 vs 8)."""
